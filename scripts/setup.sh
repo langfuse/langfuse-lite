@@ -12,8 +12,16 @@ TAG="${LANGFUSE_IMAGE_TAG:-4}"
 uv venv -q .venv -p 3.12
 VIRTUAL_ENV=.venv uv pip install -q -r shims/requirements.txt
 
-docker pull "docker.langfuse.com/langfuse/langfuse:$TAG"
-docker pull "docker.langfuse.com/langfuse/langfuse-worker:$TAG"
+# Docker Hub rate-limits anonymous pulls (HTTP 429); retry with backoff.
+pull() {
+  for wait in 0 60 120 240 480; do
+    sleep "$wait"
+    docker pull "$1" && return 0
+  done
+  return 1
+}
+pull "docker.langfuse.com/langfuse/langfuse:$TAG"
+pull "docker.langfuse.com/langfuse/langfuse-worker:$TAG"
 
 rm -rf vendor && mkdir -p vendor
 cid=$(docker create "docker.langfuse.com/langfuse/langfuse:$TAG")

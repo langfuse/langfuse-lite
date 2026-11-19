@@ -2,10 +2,10 @@
   "name": "langfuse-lite-shims",
   "private": true,
   "type": "module",
-  "dependencies": {
-    "@electric-sql/pglite-socket": "0.2.20"
-  },
   "devDependencies": {
     "pg": "^8"
+  },
+  "dependencies": {
+    "@electric-sql/pglite": "^0.5.17"
   }
 }

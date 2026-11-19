@@ -47,24 +47,47 @@ class ClickHouse:
     def __init__(self, data: str):
         self.session = chdb_session.Session(data)
         self.lock = asyncio.Lock()
-        self.applied_settings: dict[str, str] = {}
+        self.applied_settings: dict[str, str] = {}   # settings this session currently has changed
+        self.original_settings: dict[str, str] = {}  # their values before the first change
         self.unsupported_settings: set[str] = set()
 
     def run(self, sql: str, params: dict[str, str] | None = None) -> bytes:
         result = self.session.query(sql, "TabSeparated", params=params or None)
         return result.bytes() if hasattr(result, "bytes") else str(result).encode()
 
+    def _set(self, key: str, value: str) -> bool:
+        literal = value if NUMBER.match(value) else "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+        try:
+            self.run(f"SET {key} = {literal}")
+            return True
+        except Exception as exc:  # noqa: BLE001 - an unknown setting must not fail the query
+            self.unsupported_settings.add(key)
+            print(f"clickhouse: ignoring setting {key}={value}: {str(exc)[:120]}", flush=True)
+            return False
+
     def apply_settings(self, settings: dict[str, str]) -> None:
+        """Make the session's settings match this request's.
+
+        SET lasts for the whole chDB session, so a setting one request sends would
+        leak into later requests. Settings the previous request changed and this
+        one doesn't send are restored to their original values first.
+        """
+        for key in list(self.applied_settings):
+            if key not in settings:
+                self._set(key, self.original_settings[key])
+                del self.applied_settings[key]
         for key, value in settings.items():
             if key in self.unsupported_settings or self.applied_settings.get(key) == value:
                 continue
-            literal = value if NUMBER.match(value) else "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
-            try:
-                self.run(f"SET {key} = {literal}")
+            if key not in self.original_settings:
+                rows = self.run(f"SELECT value FROM system.settings WHERE name = '{key}'").decode().splitlines()
+                if not rows:
+                    self.unsupported_settings.add(key)
+                    print(f"clickhouse: ignoring unknown setting {key}={value}", flush=True)
+                    continue
+                self.original_settings[key] = rows[0]
+            if self._set(key, value):
                 self.applied_settings[key] = value
-            except Exception as exc:  # noqa: BLE001 - an unknown setting must not fail the query
-                self.unsupported_settings.add(key)
-                print(f"clickhouse: ignoring setting {key}={value}: {str(exc)[:120]}", flush=True)
 
     def migrate(self, directory: Path) -> None:
         started = time.monotonic()
@@ -133,7 +156,7 @@ def make_app(ch: ClickHouse, log_queries: bool = False) -> web.Application:
                 print(f"clickhouse: error {str(exc)[:300]} | sql: {sql[:300]!r}", flush=True)
                 return error_response(exc)
         if log_queries:
-            print(f"clickhouse: {round((time.monotonic() - started) * 1000)} ms {sql[:160]!r}", flush=True)
+            print(f"clickhouse: {round((time.monotonic() - started) * 1000)} ms settings={settings} {sql[:160]!r}", flush=True)
         headers = {
             "X-ClickHouse-Query-Id": query_id,
             "X-ClickHouse-Summary": json.dumps({"read_rows": "0", "read_bytes": "0", "written_rows": "0",
