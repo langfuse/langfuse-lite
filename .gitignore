@@ -1,0 +1,6 @@
+data/
+logs/
+vendor/
+.venv/
+shims/node_modules/
+__pycache__/
