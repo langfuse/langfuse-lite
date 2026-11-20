@@ -1,7 +1,6 @@
-/data/
-/logs/
-/vendor/
-/.venv/
-shims/node_modules/
+node_modules/
+dist/
+.venv-test/
+*.tgz
+.langfuse/
 __pycache__/
-/build/

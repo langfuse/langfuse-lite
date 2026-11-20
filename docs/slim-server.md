@@ -1,14 +1,15 @@
-# Plan: slim server (built: see [slim/README.md](../slim/README.md))
+# Plan: slim server (built: this is langfuse-lite, see the [README](../README.md))
 
-The Docker image runs the real Langfuse and stays the full-fidelity option.
-The slim server is a much lighter, separate option for what code agents need
-locally: **experiment runs on the Langfuse data model, and tracing and
+When this plan was written, the repository also held a Docker image running the
+full Langfuse on local stand-ins; that image has since been removed, and the
+slim server is all of langfuse-lite. The plan as written: the slim server is a
+much lighter option for what code agents need locally: **experiment runs on the Langfuse data model, and tracing and
 debugging local agent runs.**
 
 **Status:** built as planned, with these changes:
 - The span → observation conversion and cost calculation are not ported but
   **vendored unchanged** from the Langfuse worker image (41 compiled files,
-  `slim/scripts/vendor-langfuse.sh`), with small shims for Redis, ClickHouse, S3,
+  `scripts/vendor-langfuse.sh`), with small shims for Redis, ClickHouse, S3,
   env and logging. That removes most of the drift risk below.
 - Langfuse v4's data model throughout: one `observations` table, grouped by
   trace id, no trace records (the first build had an `events` table and a
@@ -118,7 +119,8 @@ runs on Node and on Bun.
 
 ## Conformance
 
-The Docker image is the reference. A test suite sends the same SDK scripts to
+A full Langfuse is the reference (at the time the Docker image, now any local
+Langfuse, e.g. its Docker Compose setup). A test suite sends the same SDK scripts to
 both and compares what the shared read endpoints return:
 - observations with generations, tools, errors and nesting
 - `run_experiment` with item and run evaluators, on a stored dataset and on local data
@@ -141,5 +143,5 @@ Run it in CI and when moving to a new Langfuse version.
 1. Server, SQLite schema, OTLP protobuf and JSON decoding.
 2. Span → observation conversion; experiment runs from span attributes; scores; datasets.
 3. Read endpoints, then `observations`, `tree`, `runs`, `compare` and `sql`.
-4. Conformance tests against the Docker image.
+4. Conformance tests against a full Langfuse.
 5. `push`, the HTML page, then packaging (npm first, then PyPI wheels).

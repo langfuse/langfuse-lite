@@ -1,6 +1,0 @@
-node_modules/
-dist/
-.venv-test/
-*.tgz
-.langfuse/
-__pycache__/

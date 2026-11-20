@@ -1,19 +1,14 @@
-# Slim server: type check, tests, build and an npx smoke run on every change
-# under slim/; the full conformance run against a real Langfuse (the Docker
-# image, built here) on main and by hand.
-name: slim
+# Type check, tests, build and an npx smoke run on every change; the full
+# conformance run against a real Langfuse (its Docker Compose setup) on main
+# and by hand.
+name: ci
 on:
   push:
-    paths: ["slim/**", ".github/workflows/slim.yml"]
   pull_request:
-    paths: ["slim/**", ".github/workflows/slim.yml"]
   workflow_dispatch:
 jobs:
   test:
     runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: slim
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -31,7 +26,7 @@ jobs:
         run: |
           npm pack --silent
           dir=$(mktemp -d)
-          (cd "$dir" && npx -y --package="$GITHUB_WORKSPACE/slim/langfuse-lite-0.1.0.tgz" langfuse-lite serve --port 3100 &)
+          (cd "$dir" && npx -y --package="$GITHUB_WORKSPACE/langfuse-lite-0.1.0.tgz" langfuse-lite serve --port 3100 &)
           for i in $(seq 50); do curl -sf http://127.0.0.1:3100/api/public/health && break; sleep 0.2; done
           uv venv -q .venv-test && VIRTUAL_ENV=.venv-test uv pip install -q -r test/requirements.txt
           .venv-test/bin/python test/scenario.py http://127.0.0.1:3100 ci
@@ -49,20 +44,22 @@ jobs:
         with:
           bun-version: 1.4.4
       - uses: astral-sh/setup-uv@v6
-      - name: Full Langfuse (the Docker image) on port 3000
+      - name: Full Langfuse (its Docker Compose setup) on port 3000
+        env:
+          LANGFUSE_INIT_ORG_ID: lite-org
+          LANGFUSE_INIT_PROJECT_ID: lite-project
+          LANGFUSE_INIT_PROJECT_PUBLIC_KEY: pk-lf-lite
+          LANGFUSE_INIT_PROJECT_SECRET_KEY: sk-lf-lite
         run: |
-          scripts/setup.sh
-          scripts/build-image.sh
-          docker run -d --name ref -p 3000:3000 langfuse-lite:latest
-          for i in $(seq 120); do [ "$(docker inspect -f '{{.State.Health.Status}}' ref)" = healthy ] && break; sleep 1; done
+          git clone --depth 1 https://github.com/langfuse/langfuse "$RUNNER_TEMP/langfuse"
+          (cd "$RUNNER_TEMP/langfuse" && docker compose up -d --wait)
+          for i in $(seq 180); do curl -sf http://127.0.0.1:3000/api/public/health && break; sleep 1; done
       - name: langfuse-lite on port 3100
-        working-directory: slim
         run: |
           npm ci && bun run scripts/build.ts
           (node dist/cli.js serve --port 3100 --db "$RUNNER_TEMP/lite.db" &)
           for i in $(seq 50); do curl -sf http://127.0.0.1:3100/api/public/health && break; sleep 0.2; done
       - name: Conformance (Python and JS SDKs)
-        working-directory: slim
         run: |
           uv venv -q .venv-test && VIRTUAL_ENV=.venv-test uv pip install -q -r test/requirements.txt
           (cd test/js && npm ci)

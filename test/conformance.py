@@ -3,8 +3,10 @@ then the same read requests to both, compared field by field.
 
     python test/conformance.py --ref http://127.0.0.1:3000 --lite http://127.0.0.1:3100
 
-The reference is the langfuse-lite Docker image (real Langfuse web + worker).
-Both URLs must be localhost; the scenario writes test data.
+The reference is any full Langfuse on localhost with the project keys
+pk-lf-lite / sk-lf-lite, for example Langfuse's Docker Compose setup with
+headless initialization (see the README). Both URLs must be localhost; the
+scenario writes test data.
 
 Comparison rules:
   - same keys, same JSON types, same values

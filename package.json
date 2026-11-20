@@ -46,7 +46,6 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/langfuse/langfuse-lite.git",
-    "directory": "slim"
+    "url": "git+https://github.com/langfuse/langfuse-lite.git"
   }
 }
