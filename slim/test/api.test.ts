@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { openDb, type Db } from "../src/db";
+import { exportViewer } from "../src/api";
 import { decodeTraceRequestProto } from "../src/otlp";
 import { push } from "../src/push";
 import { migrate } from "../src/schema";
@@ -176,6 +177,17 @@ describe("misc", () => {
     expect(await (await fetch(server.url + "/")).text()).toContain("<title>langfuse-lite</title>");
     const prompts = await call("GET", "/api/public/v2/prompts");
     expect(prompts.status).toBe(501);
+  });
+
+  test("export embeds the viewer's data in one HTML file", () => {
+    const { html, traces, runs } = exportViewer(db, 100);
+    expect(traces).toBeGreaterThan(0);
+    expect(runs).toBeGreaterThan(0);
+    const json = html.match(/window\.__LITE_DATA__ = (.*?);<\/script>/s)![1];
+    const data = JSON.parse(json);
+    expect(Object.keys(data.details)).toContain("11111111111111111111111111111111");
+    expect(data.compare.runs.map((r: any) => r.id)).toContain("exp-json-1");
+    expect(json).not.toContain("</");
   });
 
   test("push replays spans as OTLP/JSON and rewrites local dataset ids", async () => {

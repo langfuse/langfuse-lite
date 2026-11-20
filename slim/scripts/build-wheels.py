@@ -33,6 +33,7 @@ Name: langfuse-lite
 Version: {VERSION}
 Summary: A local Langfuse for experiment runs and agent tracing: one process, one SQLite file, the Langfuse SDKs unchanged.
 License: MIT
+License-File: LICENSE
 Requires-Python: >=3.9
 Project-URL: Source, https://github.com/langfuse/langfuse-lite
 Description-Content-Type: text/markdown
@@ -66,6 +67,7 @@ def build(platform: str, tag: str, out: Path) -> Path:
     files.append((f"{dist_info}/WHEEL", f"Wheel-Version: 1.0\nGenerator: langfuse-lite build-wheels.py\nRoot-Is-Purelib: false\nTag: py3-none-{tag.split('.')[0]}\n".encode()
                   + "".join(f"Tag: py3-none-{t}\n" for t in tag.split(".")[1:]).encode(), 0o644))
     files.append((f"{dist_info}/entry_points.txt", ENTRY_POINTS.encode(), 0o644))
+    files.append((f"{dist_info}/LICENSE", (ROOT / "LICENSE").read_bytes(), 0o644))
     record = [record_line(n, d) for n, d, _ in files] + [f"{dist_info}/RECORD,,"]
     files.append((f"{dist_info}/RECORD", ("\n".join(record) + "\n").encode(), 0o644))
     wheel = out / f"langfuse_lite-{VERSION}-py3-none-{tag}.whl"

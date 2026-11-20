@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { compareRuns, experimentSummaries, formatObservation, formatScore, resolveRun } from "./api";
+import { compareRuns, experimentSummaries, exportViewer, formatObservation, formatScore, resolveRun } from "./api";
 import { openDb, type Db } from "./db";
 import { LANGFUSE_VERSION } from "./langfuse";
 import { push } from "./push";
@@ -29,6 +29,7 @@ Commands:
   runs                      List experiment runs with their average scores
   compare <run> [<run>...]  Compare runs item by item (run id or name)
   sql "<query>"             Run a read-only SQL query on the database
+  export [--out <file>]     Write the viewer with its data as one HTML file (default langfuse-lite.html)
   push --to <url>           Copy everything to a Langfuse (Cloud or self-hosted)
 
 Options:
@@ -36,7 +37,7 @@ Options:
   --json            Machine-readable output
   --port <n>        serve: port (default 3000, or $PORT)
   --host <h>        serve: host (default 127.0.0.1)
-  --limit <n>       traces: how many (default 20)
+  --limit <n>       traces: how many (default 20); export: newest traces to include (default 100)
   --io              trace: also print each observation's input and output
   --public-key, --secret-key   push: target keys (or LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY)
 `;
@@ -208,7 +209,8 @@ export async function main(argv = process.argv.slice(2)) {
       json: { type: "boolean", default: false },
       port: { type: "string" },
       host: { type: "string", default: "127.0.0.1" },
-      limit: { type: "string", default: "20" },
+      limit: { type: "string" },
+      out: { type: "string" },
       io: { type: "boolean", default: false },
       to: { type: "string" },
       "public-key": { type: "string" },
@@ -239,7 +241,7 @@ export async function main(argv = process.argv.slice(2)) {
         return;
       }
       case "traces":
-        return cmdTraces(db, { limit: Number(o.limit), json: o.json! });
+        return cmdTraces(db, { limit: Number(o.limit ?? 20), json: o.json! });
       case "trace":
         return cmdTrace(db, rest[0], { json: o.json!, io: o.io! });
       case "runs":
@@ -248,6 +250,13 @@ export async function main(argv = process.argv.slice(2)) {
         return cmdCompare(db, rest, { json: o.json! });
       case "sql":
         return cmdSql(db, rest.join(" "), { json: o.json! });
+      case "export": {
+        const out = path.resolve(o.out ?? "langfuse-lite.html");
+        const { html, traces, runs } = exportViewer(db, Number(o.limit ?? 100));
+        fs.writeFileSync(out, html);
+        console.log(`Wrote ${out}: ${traces} traces, ${runs} experiment runs, ${(html.length / 1024).toFixed(0)} KB. Open it in a browser; no server needed.`);
+        return;
+      }
       case "push": {
         if (!o.to) throw new Error("usage: langfuse-lite push --to <langfuse url> [--public-key ..] [--secret-key ..]");
         const publicKey = o["public-key"] ?? process.env.LANGFUSE_PUBLIC_KEY;

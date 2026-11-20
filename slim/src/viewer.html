@@ -12,19 +12,28 @@
   font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 14px;
 }
 @media (prefers-color-scheme: dark) {
-  :root {
+  :root:not([data-theme="light"]) {
     --bg: #0c0a09; --panel: #1c1917; --text: #f5f5f4; --muted: #a8a29e; --line: #292524;
     --accent: #60a5fa; --accent-soft: #1e3a5f; --error: #f87171; --error-soft: #450a0a; --warn: #fbbf24;
     --bar: #1d4ed8; --bar-gen: #6d28d9; --bar-tool: #047857; --bar-err: #b91c1c; --good: #4ade80; --bad: #f87171;
+    color-scheme: dark;
   }
 }
+:root[data-theme="dark"] {
+    --bg: #0c0a09; --panel: #1c1917; --text: #f5f5f4; --muted: #a8a29e; --line: #292524;
+    --accent: #60a5fa; --accent-soft: #1e3a5f; --error: #f87171; --error-soft: #450a0a; --warn: #fbbf24;
+    --bar: #1d4ed8; --bar-gen: #6d28d9; --bar-tool: #047857; --bar-err: #b91c1c; --good: #4ade80; --bad: #f87171;
+  color-scheme: dark;
+}
 * { box-sizing: border-box; }
+[hidden] { display: none !important; }
 body { margin: 0; background: var(--bg); color: var(--text); }
-header { display: flex; gap: 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header { display: flex; gap: 16px; align-items: center; padding: 10px max(16px, env(safe-area-inset-right, 0px)) 10px max(16px, env(safe-area-inset-left, 0px)); border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: env(safe-area-inset-top, 0px); z-index: 2; flex-wrap: wrap; }
 header h1 { font-size: 15px; margin: 0; font-weight: 650; }
 header nav button { background: none; border: 0; padding: 6px 10px; border-radius: 6px; color: var(--muted); cursor: pointer; font: inherit; }
 header nav button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
 header .grow { flex: 1; }
+header .snap { color: var(--muted); font-size: 13px; }
 header label { color: var(--muted); font-size: 13px; display: flex; gap: 6px; align-items: center; }
 main { display: grid; grid-template-columns: minmax(280px, 420px) 1fr; height: calc(100vh - 49px); }
 main.single { grid-template-columns: 1fr; }
@@ -80,7 +89,8 @@ a { color: var(--accent); cursor: pointer; text-decoration: none; }
   <h1>langfuse-lite</h1>
   <nav><button data-tab="traces" class="on">Traces</button><button data-tab="runs">Experiments</button></nav>
   <span class="grow"></span>
-  <label><input type="checkbox" id="live" checked> live</label>
+  <span id="snapshot" class="snap" hidden></span>
+  <label id="live-toggle"><input type="checkbox" id="live" checked> live</label>
 </header>
 <main id="main"></main>
 <script>
@@ -92,7 +102,31 @@ const secs = (a, b) => a && b ? (new Date(b) - new Date(a)) / 1000 : null;
 const when = (t) => t ? new Date(t).toLocaleString() : "";
 const pretty = (v) => { if (v == null) return ""; if (typeof v !== "string") return JSON.stringify(v, null, 2); try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v; } };
 const compact = (v) => { if (v == null) return ""; if (typeof v !== "string") return JSON.stringify(v); try { return JSON.stringify(JSON.parse(v)); } catch { return v; } };
-const api = async (p) => { const r = await fetch(p); if (!r.ok) throw new Error((await r.json()).message); return r.json(); };
+// An exported snapshot (langfuse-lite export) carries its data in window.__LITE_DATA__.
+const SNAPSHOT = window.__LITE_DATA__;
+function snapshotApi(p) {
+  const u = new URL(p, location.href);
+  if (u.pathname === "/api/lite/traces") return { data: SNAPSHOT.traces };
+  if (u.pathname.startsWith("/api/lite/traces/")) {
+    const t = SNAPSHOT.details[decodeURIComponent(u.pathname.slice("/api/lite/traces/".length))];
+    if (!t) throw new Error("This trace is not in the snapshot.");
+    return t;
+  }
+  if (u.pathname === "/api/lite/experiments") return { data: SNAPSHOT.experiments };
+  if (u.pathname === "/api/lite/compare") {
+    const ids = u.searchParams.getAll("run");
+    const runs = ids.map((id) => SNAPSHOT.compare.runs.find((r) => r.id === id)).filter(Boolean);
+    const items = SNAPSHOT.compare.items.filter((it) => runs.some((r) => it.runs[r.id]));
+    return { runs, items };
+  }
+  throw new Error("Not in the snapshot: " + u.pathname);
+}
+const api = async (p) => {
+  if (SNAPSHOT) return snapshotApi(p);
+  const r = await fetch(p);
+  if (!r.ok) throw new Error((await r.json()).message);
+  return r.json();
+};
 const state = { tab: "traces", trace: null, obs: null, runs: new Set() };
 try { Object.assign(state, JSON.parse(localStorage.getItem("lite-view") || "{}"), { runs: new Set(JSON.parse(localStorage.getItem("lite-runs") || "[]")) }); } catch {}
 const save = () => { try { localStorage.setItem("lite-view", JSON.stringify({ tab: state.tab, trace: state.trace })); localStorage.setItem("lite-runs", JSON.stringify([...state.runs])); } catch {} };
@@ -145,7 +179,7 @@ async function renderTrace(id) {
     return `<div class="node ${o.level === "ERROR" ? "error" : ""} ${o.id === state.obs ? "sel" : ""}" data-id="${esc(o.id)}">
       <div class="label" style="padding-left:${d * 16}px"><span class="type">${esc(o.type)}</span>${esc(o.name)}${o.model ? ` <span class="mono" style="color:var(--muted)">${esc(o.model)}</span>` : ""}</div>
       <div class="lane"><div class="bar ${esc(o.type)} ${o.level === "ERROR" ? "err" : ""}" style="left:${left}%;width:${width}%"></div>
-      <span class="dur" style="left:calc(${Math.min(left + width, 88)}% + 6px)">${dur(secs(o.startTime, o.endTime))}${o.totalCost ? " · " + money(o.totalCost) : ""}</span></div></div>`;
+      <span class="dur" style="${left + width > 70 ? `right:calc(${100 - left}% + 6px)` : `left:calc(${left + width}% + 6px)`}">${dur(secs(o.startTime, o.endTime))}${o.totalCost ? " · " + money(o.totalCost) : ""}</span></div></div>`;
   }).join("");
   const scores = t.scores.length ? `<div style="margin-top:10px">${t.scores.map((s) => `<span class="score badge">${esc(s.name)}: ${esc(s.value)}</span>`).join("")}</div>` : "";
   $("#pane").innerHTML = `<h2>${esc(root.name || id)}</h2>
@@ -204,8 +238,13 @@ async function renderCompare() {
   pane.querySelectorAll("a[data-trace]").forEach((a) => a.onclick = () => { state.tab = "traces"; state.trace = a.dataset.trace; state.obs = null; save(); render(); });
 }
 
+if (SNAPSHOT) {
+  $("#live-toggle").hidden = true;
+  $("#snapshot").hidden = false;
+  $("#snapshot").textContent = `Snapshot exported ${new Date(SNAPSHOT.exportedAt).toLocaleString()}`;
+}
 render();
-setInterval(() => { if ($("#live").checked && document.visibilityState === "visible" && !window.getSelection()?.toString()) render(); }, 3000);
+setInterval(() => { if (!SNAPSHOT && $("#live").checked && document.visibilityState === "visible" && !window.getSelection()?.toString()) render(); }, 3000);
 </script>
 </body>
 </html>

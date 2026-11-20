@@ -674,21 +674,11 @@ route("GET", "/api/public/experiment-items", ({ db, url }) => ok(listExperimentI
 
 // langfuse-lite's own endpoints, for the viewer.
 route("GET", "/", () => new Response(VIEWER_HTML, { headers: { "content-type": "text/html; charset=utf-8" } }));
-route("GET", "/api/lite/traces", ({ db, url }) => {
-  const limit = limitOf(url.searchParams, 100, 1000);
-  return ok({ data: db.all("SELECT * FROM traces ORDER BY start_time DESC LIMIT ?", limit) });
-});
+route("GET", "/api/lite/traces", ({ db, url }) => ok({ data: listTraces(db, limitOf(url.searchParams, 100, 1000)) }));
 route("GET", "/api/lite/traces/:id", ({ db, params }) => {
-  const id = decodeURIComponent(params[0]);
-  const rows = db.all<EventRow>("SELECT * FROM events WHERE trace_id = ? ORDER BY start_time, id", id);
-  if (!rows.length) throw notFound("Trace");
-  const all = new Set(OBSERVATION_FIELDS);
-  const scores = db.all<ScoreRow>("SELECT * FROM scores WHERE trace_id = ? ORDER BY timestamp", id);
-  return ok({
-    id,
-    observations: rows.map((r) => formatObservation(r, all)),
-    scores: scores.map((s) => formatScore(s, new Set(["core", "details", "subject"]))),
-  });
+  const detail = traceDetail(db, decodeURIComponent(params[0]));
+  if (!detail) throw notFound("Trace");
+  return ok(detail);
 });
 route("GET", "/api/lite/experiments", ({ db }) => ok({ data: experimentSummaries(db) }));
 route("GET", "/api/lite/compare", ({ db, url }) => {
@@ -739,6 +729,49 @@ async function route_(db: Db, req: Request): Promise<Response> {
     const message = e instanceof Error ? e.message : String(e);
     return ok({ message, error: "InternalServerError" }, 500);
   }
+}
+
+// ---------------------------------------------------------------- viewer data (also used by export)
+
+export function listTraces(db: Db, limit: number) {
+  return db.all<Record<string, any>>("SELECT * FROM traces ORDER BY start_time DESC LIMIT ?", limit);
+}
+
+export function traceDetail(db: Db, id: string) {
+  const rows = db.all<EventRow>("SELECT * FROM events WHERE trace_id = ? ORDER BY start_time, id", id);
+  if (!rows.length) return null;
+  const all = new Set(OBSERVATION_FIELDS);
+  const scores = db.all<ScoreRow>("SELECT * FROM scores WHERE trace_id = ? ORDER BY timestamp", id);
+  return {
+    id,
+    observations: rows.map((r) => formatObservation(r, all)),
+    scores: scores.map((s) => formatScore(s, new Set(["core", "details", "subject"]))),
+  };
+}
+
+/** The viewer with its data embedded: one HTML file that works without a server. */
+export function exportViewer(db: Db, limit: number): { html: string; traces: number; runs: number } {
+  const traces = listTraces(db, limit);
+  const experiments = experimentSummaries(db);
+  // Traces of the exported runs are included even when older than the newest `limit`.
+  const runTraceIds = experiments.length
+    ? db.all<{ trace_id: string }>(
+        `SELECT DISTINCT trace_id FROM events WHERE experiment_id IN (${experiments.map(() => "?").join(",")})`,
+        ...experiments.map((e) => e.id),
+      ).map((r) => r.trace_id)
+    : [];
+  const details: Record<string, unknown> = {};
+  for (const id of new Set([...traces.map((t) => t.id), ...runTraceIds])) details[id] = traceDetail(db, id);
+  const data = {
+    exportedAt: new Date().toISOString(),
+    traces,
+    details,
+    experiments,
+    compare: experiments.length ? compareRuns(db, experiments.map((e) => e.id)) : { runs: [], items: [] },
+  };
+  const json = JSON.stringify(data).replace(/</g, "\\u003c");
+  const html = VIEWER_HTML.replace("<script>", `<script>window.__LITE_DATA__ = ${json};</script>\n<script>`);
+  return { html, traces: Object.keys(details).length, runs: experiments.length };
 }
 
 // ---------------------------------------------------------------- run summaries (CLI, viewer)

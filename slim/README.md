@@ -16,6 +16,8 @@ OpenTelemetry traces to `http://localhost:3000/api/public/otel/v1/traces`.
 Data goes to `./.langfuse/lite.db`. Open http://localhost:3000 for the viewer.
 
 Not published to npm or PyPI yet; build locally (see Development).
+`python test/demo.py http://127.0.0.1:3000` writes demo data (agent traces and
+two comparable experiment runs) through the Python SDK.
 
 ## For agents: the commands
 
@@ -43,6 +45,7 @@ a4ea15d60fb5f964  capitals-exp - 2026-11-20T08:14:45Z  capitals   3             
 $ langfuse-lite compare capitals-exp-v1 capitals-exp-v2     # by name (latest run) or id
 $ langfuse-lite sql "SELECT name, COUNT(*) FROM events WHERE level = 'ERROR' GROUP BY 1"
 $ langfuse-lite push --to https://cloud.langfuse.com --public-key pk-lf-… --secret-key sk-lf-…
+$ langfuse-lite export --out run.html     # the viewer and its data in one file, to open or send
 ```
 
 Every command takes `--json`. `--db <path>` (or `LANGFUSE_LITE_DB`) picks
@@ -177,3 +180,8 @@ rebuild, run the conformance tests.
 - Cost uses Langfuse's default model prices only; custom models need `push`.
 - One local user: any API key is accepted and requests run one at a time.
 - Not published yet: the npm and PyPI names (`langfuse-lite`) were free when checked.
+
+## License
+
+MIT. The vendored Langfuse code is MIT as well (`vendor/LICENSE-langfuse`);
+`dist/THIRD_PARTY_NOTICES.md` lists everything the bundle contains.
