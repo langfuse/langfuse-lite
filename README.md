@@ -12,38 +12,93 @@ four stores they need.
 | Redis | a real `redis-server` | Redis, on 6379 |
 | S3 | [moto](https://github.com/getmoto/moto)'s S3 server | the S3 API, on 9090 |
 
-No Langfuse code is changed or forked. Upgrading means pulling a newer image
-and re-running `scripts/setup.sh`, which copies that image's own migrations.
+No Langfuse code is changed or forked. Upgrading means rebuilding on a newer
+Langfuse image; the schema always comes from that image's own migrations.
 
-**Status: prototype, step 2.** The base public API and MCP work for everything
-the agent-testing usage suite does. It is not a supported Langfuse distribution.
+**Status: prototype, step 3.** One image, one `docker run`. The base public API
+and MCP work for everything the agent-testing usage suite does. It is not a
+supported Langfuse distribution.
 
-## Run
+## Run: one container
 
 ```bash
-scripts/setup.sh            # once: shim dependencies, images, migrations from the image
-scripts/start.sh --fresh    # start everything on an empty data folder
-python3 scripts/smoke.py    # trace round trip + API probes
+scripts/setup.sh              # once: shim dependencies, Langfuse images, their migrations
+scripts/build-image.sh        # -> langfuse-lite:latest (about 1.5 minutes)
+docker run -d --name langfuse-lite -p 3000:3000 langfuse-lite:latest
+python3 scripts/smoke.py      # trace round trip + API probes
+```
+
+Then use the API at http://localhost:3000 with `pk-lf-lite` / `sk-lf-lite`, or
+log in as `lite@example.com` / `lite-password` (the UI is untested).
+
+- **Healthy** when `docker inspect -f '{{.State.Health.Status}}' langfuse-lite` says
+  `healthy`, so compose files can use `depends_on: {langfuse-lite: {condition: service_healthy}}`.
+- **Data** lives in `/data`. Without a volume every container starts from the
+  built-in snapshot; add `-v langfuse-lite-data:/data` to keep data across restarts.
+- **Settings** default to `langfuse-lite.env` + `worker.env`; `docker run -e` overrides
+  any of them. Keep `SALT` and `ENCRYPTION_KEY` as they are: the snapshot's API
+  keys were created with them. Extra `LANGFUSE_INIT_*` values add another org,
+  project and key next to `lite-org`.
+- **Stop** with `docker stop`: Langfuse gets 3 s (`LITE_STOP_GRACE`), then the
+  stand-ins close their files. Takes about 4 s.
+
+The image is `FROM` the official web image, with the worker app copied from the
+worker image, `redis-server` from the official Redis image, a portable Python
+with the shims, and one entrypoint (`docker/entrypoint.sh`) that starts the four
+stand-ins on `127.0.0.1`, then the worker (`127.0.0.1:3030`) and web (`0.0.0.0:3000`).
+
+`build-image.sh` bakes in a snapshot that is already migrated and already
+through Langfuse's first start: it starts the image once and waits for web to
+seed ~200 default model prices, the built-in dashboards and `lite-org`, which
+takes about 20 s through PGlite and would otherwise happen in every fresh
+container.
+
+`.github/workflows/image.yml` builds, smoke-tests and pushes
+`ghcr.io/langfuse/langfuse-lite:<langfuse tag>`; it runs only when started by hand.
+
+## Run: processes on the host (for working on the shims)
+
+```bash
+scripts/setup.sh            # once (also needs redis-server on the host)
+scripts/start.sh --fresh    # stand-ins as host processes, web and worker as containers
+python3 scripts/smoke.py
 scripts/stop.sh
 ```
 
-Then use the API with `pk-lf-lite` / `sk-lf-lite`, or open http://localhost:3000
-(user `lite@example.com`, password `lite-password`; the UI is untested).
-Settings are in `langfuse-lite.env`; `worker.env` switches the worker to base features.
+## Check against the agent-testing usage suite
 
-To check it against the agent-testing usage suite (no agents involved):
+No agents involved; run with the agent-testing repo's Python environment:
 
 ```bash
-python scripts/check_usage_suite.py --agent-testing ../coding-agent-testing
+../coding-agent-testing/.venv/bin/python scripts/check_usage_suite.py --agent-testing ../coding-agent-testing
 ```
 
 ## Results (Langfuse 4.83.0, `langfuse:4` images)
 
 Measured in a 4-core, 15 GB Linux VM.
 
+**The image**
+
 | | Result |
 |---|---|
-| Cold start, empty data folder | about 15 s to a healthy web, including 491 Postgres and 56 ClickHouse migrations |
+| Download | 585 MB compressed (the official web + worker images: 224 + 164 MB) |
+| Unpacked | 2.77 GB: web image 1.06 GB, worker app, chDB 551 MB, Python 109 MB, moto/flask/aiohttp 120 MB, snapshot 50 MB |
+| `docker load` on a daemon without any Langfuse layers | 13.6 s (a registry pull adds the 585 MB download) |
+| `docker run` → healthy | 12–15 s on every fresh container (no migrations, no seeding); stand-ins ready after 2 s, the rest is Langfuse web booting |
+| `docker stop` | 3.6 s, exit code 0; data on a volume survives restarts |
+| Build (`build-image.sh`, images already pulled) | 60–105 s, including the 40 s warm-up start |
+| Memory | 2.4 GB |
+| `smoke.py`, `check_usage_suite.py` against the container | 8/8, 17/17 |
+
+Trimmed from the image, 330 MB together: pandas and pyarrow (chDB's
+dependencies, unused by the shim; about 210 MB) and moto's `[server]` extra,
+which pulls in every AWS service's dependencies; S3 needs only flask.
+
+**Behavior (same in the container and on the host)**
+
+| | Result |
+|---|---|
+| Cold start, host processes, empty data folder | about 15 s to a healthy web, including 491 Postgres and 56 ClickHouse migrations |
 | One trace sent over OTLP → readable from `/api/public/v2/observations` | 1–2.5 s, with input, output, user, token usage and computed cost |
 | Usage-suite fixture (`support-desk-v1`) seeded and queryable | 34 s for 697 observations and 135 scores (Langfuse Cloud: 1–3 minutes) |
 | `check_usage_suite.py` | 17/17: all 7 read tasks give the fixture's known answers, all 4 write tasks pass the suite's state checks with no collateral writes, MCP lists 99 tools and returns seeded data |
@@ -98,5 +153,7 @@ and 2–3 minutes until web is ready; that stack was not run for this comparison
   `scripts/check_usage_suite.py`. Untested: the UI and everything turned off in `worker.env`.
 - Throughput is low by design: every Postgres and ClickHouse request runs one at
   a time. Fine for one user or one test; not for load.
-- Web and worker still run as Docker containers. A single binary is a later step.
-- Everything binds to `127.0.0.1` and uses fixed demo secrets. Local use only.
+- The image is not published yet: run the `image` workflow, or build locally.
+- x86-64 only (chDB and the portable Python are built per architecture; arm64 would need its own build).
+- About 10 of the 12–15 s start is Langfuse web booting, which the image does not change.
+- Fixed demo secrets; web listens on all interfaces inside the container. Local use only.

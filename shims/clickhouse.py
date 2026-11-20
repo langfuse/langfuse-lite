@@ -181,12 +181,19 @@ def main() -> None:
     p.add_argument("--host", default="127.0.0.1")
     p.add_argument("--port", type=int, default=8123)
     p.add_argument("--log-queries", action="store_true")
+    p.add_argument("--migrate-only", action="store_true", help="apply migrations and exit")
     args = p.parse_args()
     Path(args.data).mkdir(parents=True, exist_ok=True)
     ch = ClickHouse(args.data)
     ch.migrate(Path(args.migrations))
+    if args.migrate_only:
+        ch.session.close()
+        return
     print(f"clickhouse: listening on {args.host}:{args.port}", flush=True)
-    web.run_app(make_app(ch, args.log_queries), host=args.host, port=args.port, access_log=None, print=None)
+    try:
+        web.run_app(make_app(ch, args.log_queries), host=args.host, port=args.port, access_log=None, print=None)
+    finally:
+        ch.session.close()
 
 
 if __name__ == "__main__":

@@ -4,3 +4,4 @@ vendor/
 .venv/
 shims/node_modules/
 __pycache__/
+build/

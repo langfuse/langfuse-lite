@@ -27,6 +27,7 @@ const { values: args } = parseArgs({
     host: { type: "string", default: "127.0.0.1" },
     port: { type: "string", default: "5432" },
     debug: { type: "boolean", default: false },
+    "migrate-only": { type: "boolean", default: false },
   },
 });
 
@@ -52,6 +53,10 @@ for (const name of pending) {
   await db.query("INSERT INTO _lite_migrations (name) VALUES ($1)", [name]);
 }
 console.log(`postgres: ${pending.length} migrations applied, ${applied.size} already present (${Math.round(performance.now() - t0)} ms)`);
+if (args["migrate-only"]) {
+  await db.close();
+  process.exit(0);
+}
 
 // ---------------------------------------------------------------- scheduling
 

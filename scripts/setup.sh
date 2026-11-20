@@ -11,6 +11,7 @@ TAG="${LANGFUSE_IMAGE_TAG:-4}"
 (cd shims && npm install --no-audit --no-fund)
 uv venv -q .venv -p 3.12
 VIRTUAL_ENV=.venv uv pip install -q -r shims/requirements.txt
+VIRTUAL_ENV=.venv uv pip install -q --no-deps -r shims/requirements-chdb.txt
 
 # Docker Hub rate-limits anonymous pulls (HTTP 429); retry with backoff.
 pull() {

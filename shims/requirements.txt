@@ -1,3 +1,7 @@
-chdb==4.5.1
+# chDB is installed separately with --no-deps: the shim needs only chdb-core,
+# not pandas or pyarrow (about 210 MB). See scripts/setup.sh.
 aiohttp==3.12.15
-moto[s3,server]==5.1.10
+# moto's [server] extra pulls in every AWS service's dependencies; S3 needs only flask.
+moto[s3]==5.1.10
+flask==3.1.3
+flask-cors==6.0.5
