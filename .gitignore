@@ -1,7 +1,7 @@
-data/
-logs/
-vendor/
-.venv/
+/data/
+/logs/
+/vendor/
+/.venv/
 shims/node_modules/
 __pycache__/
-build/
+/build/

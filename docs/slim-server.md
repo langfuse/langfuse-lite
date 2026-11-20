@@ -1,9 +1,20 @@
-# Plan: slim server (step 2 of langfuse-lite, not started)
+# Plan: slim server (built: see [slim/README.md](../slim/README.md))
 
 The Docker image runs the real Langfuse and stays the full-fidelity option.
 The slim server is a much lighter, separate option for what code agents need
 locally: **experiment runs on the Langfuse data model, and tracing and
 debugging local agent runs.**
+
+**Status:** built as planned, with these changes:
+- The span → observation conversion and cost calculation are not ported but
+  **vendored unchanged** from the Langfuse worker image (41 compiled files,
+  `slim/scripts/vendor-langfuse.sh`), with small shims for Redis, ClickHouse, S3,
+  env and logging. That removes most of the drift risk below.
+- Experiment runs are read through Langfuse v4's `/api/public/experiments` and
+  `/api/public/experiment-items`; v4 turns off the older dataset-run endpoints.
+- The JS SDK (6.1.1) uses the same OTLP endpoint, sending OTLP/JSON; the
+  Python SDK sends protobuf. Both pass the conformance suite.
+- The Python SDK posts scores as batches (202, or 207 with per-score errors).
 
 ## Goal
 

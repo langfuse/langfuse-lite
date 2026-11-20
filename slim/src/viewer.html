@@ -1,0 +1,211 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>langfuse-lite</title>
+<style>
+:root {
+  --bg: #fafaf9; --panel: #ffffff; --text: #1c1917; --muted: #78716c; --line: #e7e5e4;
+  --accent: #2563eb; --accent-soft: #dbeafe; --error: #dc2626; --error-soft: #fee2e2; --warn: #b45309;
+  --bar: #93c5fd; --bar-gen: #a78bfa; --bar-tool: #6ee7b7; --bar-err: #fca5a5; --good: #15803d; --bad: #b91c1c;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 14px;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #0c0a09; --panel: #1c1917; --text: #f5f5f4; --muted: #a8a29e; --line: #292524;
+    --accent: #60a5fa; --accent-soft: #1e3a5f; --error: #f87171; --error-soft: #450a0a; --warn: #fbbf24;
+    --bar: #1d4ed8; --bar-gen: #6d28d9; --bar-tool: #047857; --bar-err: #b91c1c; --good: #4ade80; --bad: #f87171;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--bg); color: var(--text); }
+header { display: flex; gap: 16px; align-items: center; padding: 10px 16px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+header h1 { font-size: 15px; margin: 0; font-weight: 650; }
+header nav button { background: none; border: 0; padding: 6px 10px; border-radius: 6px; color: var(--muted); cursor: pointer; font: inherit; }
+header nav button.on { background: var(--accent-soft); color: var(--accent); font-weight: 600; }
+header .grow { flex: 1; }
+header label { color: var(--muted); font-size: 13px; display: flex; gap: 6px; align-items: center; }
+main { display: grid; grid-template-columns: minmax(280px, 420px) 1fr; height: calc(100vh - 49px); }
+main.single { grid-template-columns: 1fr; }
+.list { border-right: 1px solid var(--line); overflow: auto; }
+.pane { overflow: auto; padding: 16px; }
+.row { padding: 9px 14px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.row:hover { background: var(--accent-soft); }
+.row.sel { background: var(--accent-soft); box-shadow: inset 3px 0 var(--accent); }
+.row .t { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.row .m { color: var(--muted); font-size: 12px; margin-top: 2px; display: flex; gap: 10px; flex-wrap: wrap; }
+.badge { display: inline-block; font-size: 11px; padding: 1px 6px; border-radius: 4px; background: var(--line); color: var(--muted); font-weight: 600; }
+.badge.err { background: var(--error-soft); color: var(--error); }
+.badge.exp { background: var(--accent-soft); color: var(--accent); }
+.mono { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+.empty { color: var(--muted); padding: 40px 16px; text-align: center; line-height: 1.6; }
+h2 { font-size: 16px; margin: 0 0 4px; }
+.sub { color: var(--muted); font-size: 13px; margin-bottom: 14px; display: flex; gap: 12px; flex-wrap: wrap; }
+.tree { border: 1px solid var(--line); border-radius: 8px; background: var(--panel); overflow: hidden; }
+.node { display: grid; grid-template-columns: minmax(200px, 45%) 1fr; align-items: center; padding: 5px 10px; border-bottom: 1px solid var(--line); cursor: pointer; }
+.node:last-child { border-bottom: 0; }
+.node:hover, .node.sel { background: var(--accent-soft); }
+.node .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.node .type { font-size: 10px; font-weight: 700; color: var(--muted); margin-right: 6px; }
+.node.error .label { color: var(--error); }
+.lane { position: relative; height: 14px; }
+.lane .bar { position: absolute; top: 2px; height: 10px; border-radius: 3px; background: var(--bar); min-width: 2px; }
+.lane .bar.GENERATION { background: var(--bar-gen); }
+.lane .bar.TOOL { background: var(--bar-tool); }
+.lane .bar.err { background: var(--bar-err); }
+.lane .dur { position: absolute; top: -1px; font-size: 11px; color: var(--muted); white-space: nowrap; }
+.detail { margin-top: 16px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); padding: 14px; }
+.detail h3 { margin: 0 0 8px; font-size: 14px; }
+.kv { display: grid; grid-template-columns: max-content 1fr; gap: 4px 14px; font-size: 13px; margin-bottom: 10px; }
+.kv dt { color: var(--muted); }
+.kv dd { margin: 0; word-break: break-word; }
+pre { background: var(--bg); border: 1px solid var(--line); border-radius: 6px; padding: 10px; overflow: auto; max-height: 340px; margin: 4px 0 12px; white-space: pre-wrap; word-break: break-word; }
+.label-sm { font-size: 12px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+table { border-collapse: collapse; width: 100%; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; overflow: hidden; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: top; font-size: 13px; }
+th { color: var(--muted); font-weight: 600; font-size: 12px; background: var(--bg); }
+td .out { max-width: 360px; white-space: pre-wrap; word-break: break-word; }
+.score { display: inline-block; margin: 2px 6px 0 0; font-size: 12px; }
+.good { color: var(--good); font-weight: 600; } .bad { color: var(--bad); font-weight: 600; }
+a { color: var(--accent); cursor: pointer; text-decoration: none; }
+.runs { display: flex; flex-direction: column; gap: 0; }
+.runs label { display: flex; gap: 10px; padding: 9px 14px; border-bottom: 1px solid var(--line); cursor: pointer; align-items: flex-start; }
+.runs input { margin-top: 3px; }
+@media (max-width: 760px) { main { grid-template-columns: 1fr; height: auto; } .list { border-right: 0; max-height: 45vh; } .node { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>langfuse-lite</h1>
+  <nav><button data-tab="traces" class="on">Traces</button><button data-tab="runs">Experiments</button></nav>
+  <span class="grow"></span>
+  <label><input type="checkbox" id="live" checked> live</label>
+</header>
+<main id="main"></main>
+<script>
+const $ = (s, el = document) => el.querySelector(s);
+const esc = (v) => String(v ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
+const dur = (s) => s == null ? "" : s < 1 ? Math.round(s * 1000) + " ms" : s < 120 ? s.toFixed(1) + " s" : (s / 60).toFixed(1) + " min";
+const money = (n) => !n ? "" : "$" + (n < 0.01 ? Number(n).toPrecision(2) : Number(n).toFixed(4));
+const secs = (a, b) => a && b ? (new Date(b) - new Date(a)) / 1000 : null;
+const when = (t) => t ? new Date(t).toLocaleString() : "";
+const pretty = (v) => { if (v == null) return ""; if (typeof v !== "string") return JSON.stringify(v, null, 2); try { return JSON.stringify(JSON.parse(v), null, 2); } catch { return v; } };
+const compact = (v) => { if (v == null) return ""; if (typeof v !== "string") return JSON.stringify(v); try { return JSON.stringify(JSON.parse(v)); } catch { return v; } };
+const api = async (p) => { const r = await fetch(p); if (!r.ok) throw new Error((await r.json()).message); return r.json(); };
+const state = { tab: "traces", trace: null, obs: null, runs: new Set() };
+try { Object.assign(state, JSON.parse(localStorage.getItem("lite-view") || "{}"), { runs: new Set(JSON.parse(localStorage.getItem("lite-runs") || "[]")) }); } catch {}
+const save = () => { try { localStorage.setItem("lite-view", JSON.stringify({ tab: state.tab, trace: state.trace })); localStorage.setItem("lite-runs", JSON.stringify([...state.runs])); } catch {} };
+
+document.querySelectorAll("nav button").forEach((b) => b.onclick = () => { state.tab = b.dataset.tab; save(); render(); });
+
+async function render() {
+  document.querySelectorAll("nav button").forEach((b) => b.classList.toggle("on", b.dataset.tab === state.tab));
+  try { state.tab === "traces" ? await renderTraces() : await renderRuns(); }
+  catch (e) { $("#main").innerHTML = `<div class="empty">${esc(e.message)}</div>`; }
+}
+
+async function renderTraces() {
+  const { data } = await api("/api/lite/traces?limit=200");
+  const main = $("#main"); main.className = "";
+  if (!data.length) { main.className = "single"; main.innerHTML = `<div class="empty">No traces yet.<br>Point a Langfuse SDK or any OTLP exporter at <span class="mono">${esc(location.origin)}</span><br>(<span class="mono">LANGFUSE_BASE_URL=${esc(location.origin)}</span>, any keys).</div>`; return; }
+  if (!state.trace || !data.some((t) => t.id === state.trace)) state.trace = data[0].id;
+  const list = data.map((t) => `<div class="row ${t.id === state.trace ? "sel" : ""}" data-id="${esc(t.id)}">
+      <div class="t">${esc(t.name || t.id)}</div>
+      <div class="m"><span>${esc(when(t.start_time))}</span><span>${dur(secs(t.start_time, t.end_time))}</span><span>${t.observation_count} obs</span>
+      ${t.total_cost ? `<span>${money(t.total_cost)}</span>` : ""}${t.error_count ? `<span class="badge err">${t.error_count} error${t.error_count > 1 ? "s" : ""}</span>` : ""}
+      ${t.experiment_id ? `<span class="badge exp">experiment</span>` : ""}${t.user_id ? `<span>${esc(t.user_id)}</span>` : ""}</div></div>`).join("");
+  const scroll = $(".list")?.scrollTop ?? 0;
+  main.innerHTML = `<div class="list">${list}</div><div class="pane" id="pane"></div>`;
+  $(".list").scrollTop = scroll;
+  main.querySelectorAll(".row").forEach((r) => r.onclick = () => { state.trace = r.dataset.id; state.obs = null; save(); renderTraces(); });
+  await renderTrace(state.trace);
+}
+
+async function renderTrace(id) {
+  const t = await api(`/api/lite/traces/${encodeURIComponent(id)}`);
+  const obs = t.observations;
+  const start = Math.min(...obs.map((o) => +new Date(o.startTime)));
+  const end = Math.max(...obs.map((o) => +new Date(o.endTime || o.startTime)));
+  const span = Math.max(end - start, 1);
+  const byParent = new Map();
+  const ids = new Set(obs.map((o) => o.id));
+  for (const o of obs) { const p = ids.has(o.parentObservationId) ? o.parentObservationId : null; byParent.set(p, [...(byParent.get(p) || []), o]); }
+  const rows = [];
+  const walk = (p, depth) => (byParent.get(p) || []).forEach((o) => { rows.push([o, depth]); walk(o.id, depth + 1); });
+  walk(null, 0);
+  if (!state.obs || !ids.has(state.obs)) state.obs = rows[0]?.[0].id;
+  const root = rows[0]?.[0] || {};
+  const cost = obs.reduce((a, o) => a + (o.totalCost || 0), 0);
+  const tokens = obs.reduce((a, o) => a + (o.totalUsage || 0), 0);
+  const errors = obs.filter((o) => o.level === "ERROR").length;
+  const tree = rows.map(([o, d]) => {
+    const s = +new Date(o.startTime), e = +new Date(o.endTime || o.startTime);
+    const left = ((s - start) / span) * 100, width = Math.max(((e - s) / span) * 100, 0.3);
+    return `<div class="node ${o.level === "ERROR" ? "error" : ""} ${o.id === state.obs ? "sel" : ""}" data-id="${esc(o.id)}">
+      <div class="label" style="padding-left:${d * 16}px"><span class="type">${esc(o.type)}</span>${esc(o.name)}${o.model ? ` <span class="mono" style="color:var(--muted)">${esc(o.model)}</span>` : ""}</div>
+      <div class="lane"><div class="bar ${esc(o.type)} ${o.level === "ERROR" ? "err" : ""}" style="left:${left}%;width:${width}%"></div>
+      <span class="dur" style="left:calc(${Math.min(left + width, 88)}% + 6px)">${dur(secs(o.startTime, o.endTime))}${o.totalCost ? " · " + money(o.totalCost) : ""}</span></div></div>`;
+  }).join("");
+  const scores = t.scores.length ? `<div style="margin-top:10px">${t.scores.map((s) => `<span class="score badge">${esc(s.name)}: ${esc(s.value)}</span>`).join("")}</div>` : "";
+  $("#pane").innerHTML = `<h2>${esc(root.name || id)}</h2>
+    <div class="sub"><span class="mono">${esc(id)}</span><span>${esc(when(root.startTime))}</span><span>${dur(span / 1000)}</span>
+      ${tokens ? `<span>${tokens} tokens</span>` : ""}${cost ? `<span>${money(cost)}</span>` : ""}${errors ? `<span class="badge err">${errors} error${errors > 1 ? "s" : ""}</span>` : ""}
+      ${root.userId ? `<span>user ${esc(root.userId)}</span>` : ""}${root.sessionId ? `<span>session ${esc(root.sessionId)}</span>` : ""}</div>
+    <div class="tree">${tree}</div>${scores}<div id="detail"></div>`;
+  $("#pane").querySelectorAll(".node").forEach((n) => n.onclick = () => { state.obs = n.dataset.id; renderTrace(id); });
+  const o = obs.find((x) => x.id === state.obs);
+  if (o) $("#detail").innerHTML = detail(o, t.scores.filter((s) => s.subject?.id === o.id));
+}
+
+function detail(o, scores) {
+  const kv = [["type", o.type], ["id", o.id], ["level", o.level + (o.statusMessage ? ": " + o.statusMessage : "")], ["start", when(o.startTime)],
+    ["duration", dur(secs(o.startTime, o.endTime))], ["model", o.model], ["usage", Object.keys(o.usageDetails || {}).length ? JSON.stringify(o.usageDetails) : ""],
+    ["cost", money(o.totalCost)], ["model parameters", Object.keys(o.modelParameters || {}).length ? JSON.stringify(o.modelParameters) : ""],
+    ["environment", o.environment], ["scores", scores.map((s) => `${s.name}=${s.value}`).join(", ")]].filter(([, v]) => v);
+  return `<div class="detail"><h3>${esc(o.name)}</h3><dl class="kv">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd class="${k === "id" ? "mono" : ""}">${esc(v)}</dd>`).join("")}</dl>
+    ${o.input != null ? `<div class="label-sm">Input</div><pre class="mono">${esc(pretty(o.input))}</pre>` : ""}
+    ${o.output != null ? `<div class="label-sm">Output</div><pre class="mono">${esc(pretty(o.output))}</pre>` : ""}
+    ${Object.keys(o.metadata || {}).length ? `<div class="label-sm">Metadata</div><pre class="mono">${esc(JSON.stringify(o.metadata, null, 2))}</pre>` : ""}</div>`;
+}
+
+async function renderRuns() {
+  const { data } = await api("/api/lite/experiments");
+  const main = $("#main"); main.className = "";
+  if (!data.length) { main.className = "single"; main.innerHTML = `<div class="empty">No experiment runs yet.<br>Run one with the SDK: <span class="mono">dataset.run_experiment(...)</span> or <span class="mono">langfuse.run_experiment(...)</span>.</div>`; return; }
+  for (const id of [...state.runs]) if (!data.some((r) => r.id === id)) state.runs.delete(id);
+  if (!state.runs.size) state.runs.add(data[0].id);
+  const fmt = (v) => typeof v === "number" ? +v.toFixed(3) : v;
+  main.innerHTML = `<div class="list runs">${data.map((r) => `<label><input type="checkbox" value="${esc(r.id)}" ${state.runs.has(r.id) ? "checked" : ""}>
+      <div><div class="t" style="font-weight:600">${esc(r.name)}</div>
+      <div class="m" style="color:var(--muted);font-size:12px;display:flex;gap:10px;flex-wrap:wrap">
+        <span>${esc(r.dataset_name || (r.dataset_id ? r.dataset_id : "local data"))}</span><span>${r.items} items</span>
+        ${r.errors ? `<span class="badge err">${r.errors} errors</span>` : ""}${r.total_cost ? `<span>${money(r.total_cost)}</span>` : ""}</div>
+      <div>${Object.entries(r.scores).map(([k, v]) => `<span class="score">${esc(k)} <b>${esc(fmt(v))}</b></span>`).join("")}</div></div></label>`).join("")}</div>
+    <div class="pane" id="pane"></div>`;
+  main.querySelectorAll("input[type=checkbox]").forEach((c) => c.onchange = () => { c.checked ? state.runs.add(c.value) : state.runs.delete(c.value); save(); renderCompare(); });
+  await renderCompare();
+}
+
+async function renderCompare() {
+  const pane = $("#pane");
+  if (!state.runs.size) { pane.innerHTML = `<div class="empty">Select one or more runs to compare.</div>`; return; }
+  const q = [...state.runs].map((r) => "run=" + encodeURIComponent(r)).join("&");
+  const { runs, items } = await api("/api/lite/compare?" + q);
+  const fmt = (v) => typeof v === "number" ? +v.toFixed(3) : v;
+  const cls = (v) => v === 1 || v === true ? "good" : v === 0 || v === false ? "bad" : "";
+  const head = runs.map((r, i) => `<th>[${i + 1}] ${esc(r.name)}<div style="font-weight:400">${Object.entries(r.summary).map(([k, v]) => `${esc(k)} <b>${esc(fmt(v))}</b>`).join(" · ")}</div></th>`).join("");
+  const body = items.map((it) => `<tr><td><div class="out mono">${esc(compact(it.input))}</div></td><td><div class="out mono">${esc(compact(it.expectedOutput))}</div></td>
+    ${runs.map((r) => { const x = it.runs[r.id]; if (!x) return `<td style="color:var(--muted)">not run</td>`;
+      return `<td><div class="out mono">${esc(compact(x.output))}</div>
+        <div>${Object.entries(x.scores).map(([k, v]) => `<span class="score ${cls(v)}">${esc(k)} ${esc(fmt(v))}</span>`).join("")}</div>
+        <div style="color:var(--muted);font-size:12px">${dur(x.latency)} ${money(x.cost)} ${x.level === "ERROR" ? '<span class="badge err">error</span>' : ""} · <a data-trace="${esc(x.traceId)}">trace</a></div></td>`; }).join("")}</tr>`).join("");
+  pane.innerHTML = `<table><thead><tr><th>Input</th><th>Expected</th>${head}</tr></thead><tbody>${body}</tbody></table>`;
+  pane.querySelectorAll("a[data-trace]").forEach((a) => a.onclick = () => { state.tab = "traces"; state.trace = a.dataset.trace; state.obs = null; save(); render(); });
+}
+
+render();
+setInterval(() => { if ($("#live").checked && document.visibilityState === "visible" && !window.getSelection()?.toString()) render(); }, 3000);
+</script>
+</body>
+</html>

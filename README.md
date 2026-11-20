@@ -19,9 +19,18 @@ Langfuse image; the schema always comes from that image's own migrations.
 and MCP work for everything the agent-testing usage suite does. It is not a
 supported Langfuse distribution.
 
-**Next (planned, not started):** a slim server for experiment runs and local
-agent tracing: one TypeScript process and one SQLite file, about 1 MB, under
-1 s to start, `npx -y langfuse-lite`. See [docs/slim-server.md](docs/slim-server.md).
+## Two options
+
+| | Slim server ([`slim/`](slim/README.md)) | Full Langfuse in one container (below) |
+|---|---|---|
+| For | experiment runs, agent tracing and debugging | everything in Langfuse's base features, incl. the UI and MCP |
+| Install | `npx -y langfuse-lite serve` (219 KB) or `uvx` / a single executable | 585 MB image |
+| Start, memory | 0.1–0.6 s, 60–70 MB | 12–15 s, 2.4 GB |
+| Langfuse fidelity | the tracing, scores, datasets and experiments API; 31/31 conformance checks against the full Langfuse with the Python and JS SDKs | exact (it is Langfuse) |
+
+The slim server uses Langfuse's own span conversion and cost code, vendored
+from the worker image, and stores everything in one SQLite file; `push` copies
+it into a full Langfuse. The full container below is its conformance reference.
 
 ## Run: one container
 

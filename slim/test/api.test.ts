@@ -1,0 +1,216 @@
+// bun test: the server end to end on a temporary database, without SDKs.
+// SDK behaviour is covered by test/conformance.py against a real Langfuse.
+import { afterAll, beforeAll, describe, expect, test } from "bun:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { gzipSync } from "node:zlib";
+import { openDb, type Db } from "../src/db";
+import { decodeTraceRequestProto } from "../src/otlp";
+import { push } from "../src/push";
+import { migrate } from "../src/schema";
+import { serve, type Server } from "../src/server";
+
+let dir: string;
+let db: Db;
+let server: Server;
+const auth = { authorization: "Basic " + btoa("pk-test:sk-test") };
+const call = async (method: string, path: string, body?: unknown, headers: Record<string, string> = {}) => {
+  const res = await fetch(server.url + path, {
+    method,
+    headers: { ...auth, "content-type": "application/json", ...headers },
+    body: body === undefined ? undefined : body instanceof Uint8Array ? (body as unknown as BodyInit) : JSON.stringify(body),
+  });
+  const text = await res.text();
+  return { status: res.status, body: text ? JSON.parse(text) : null };
+};
+
+beforeAll(async () => {
+  dir = mkdtempSync(join(tmpdir(), "langfuse-lite-test-"));
+  db = await openDb(join(dir, "lite.db"));
+  migrate(db);
+  server = await serve(db, { host: "127.0.0.1", port: 0 });
+});
+afterAll(async () => {
+  await server.stop();
+  db.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// ---- a minimal protobuf encoder, independent of the decoder under test
+const varint = (n: number | bigint) => {
+  let v = BigInt(n);
+  const out: number[] = [];
+  do {
+    let b = Number(v & 0x7fn);
+    v >>= 7n;
+    if (v) b |= 0x80;
+    out.push(b);
+  } while (v);
+  return out;
+};
+const bytes = (field: number, data: number[] | Uint8Array) => [...varint((field << 3) | 2), ...varint(data.length), ...data];
+const str = (field: number, s: string) => bytes(field, [...new TextEncoder().encode(s)]);
+const fixed64 = (field: number, n: bigint) => {
+  const b = new Uint8Array(8);
+  new DataView(b.buffer).setBigUint64(0, n, true);
+  return [...varint((field << 3) | 1), ...b];
+};
+const hexBytes = (h: string) => h.match(/../g)!.map((x) => parseInt(x, 16));
+const kvString = (k: string, v: string) => bytes(9, [...str(1, k), ...bytes(2, str(1, v))]);
+const kvInt = (k: string, v: number) => bytes(9, [...str(1, k), ...bytes(2, [...varint(3 << 3), ...varint(v)])]);
+
+function protoRequest(spans: number[][]) {
+  const scope = bytes(1, [...str(1, "my-tracer"), ...str(2, "1.0")]);
+  const scopeSpans = bytes(2, [...scope, ...spans.flatMap((s) => bytes(2, s))]);
+  const resource = bytes(1, bytes(1, [...str(1, "service.name"), ...bytes(2, str(1, "proto-test"))]));
+  return new Uint8Array(bytes(1, [...resource, ...scopeSpans]));
+}
+const T0 = 1_763_620_000_000_000_000n;
+
+describe("OTLP ingestion", () => {
+  test("protobuf with GenAI attributes becomes a generation with usage and cost", async () => {
+    const traceId = "11111111111111111111111111111111";
+    const root = [
+      ...bytes(1, hexBytes(traceId)), ...bytes(2, hexBytes("aaaaaaaaaaaaaaaa")), ...str(5, "invoke_agent bot"),
+      ...fixed64(7, T0), ...fixed64(8, T0 + 2_000_000_000n), ...kvString("gen_ai.operation.name", "invoke_agent"),
+    ];
+    const chat = [
+      ...bytes(1, hexBytes(traceId)), ...bytes(2, hexBytes("bbbbbbbbbbbbbbbb")), ...bytes(4, hexBytes("aaaaaaaaaaaaaaaa")),
+      ...str(5, "chat gpt-4o"), ...fixed64(7, T0 + 100_000_000n), ...fixed64(8, T0 + 900_000_000n),
+      ...kvString("gen_ai.operation.name", "chat"), ...kvString("gen_ai.request.model", "gpt-4o"),
+      ...kvInt("gen_ai.usage.input_tokens", 1000), ...kvInt("gen_ai.usage.output_tokens", 100),
+      ...bytes(15, [...str(2, "boom"), ...varint(3 << 3), ...varint(2)]),
+    ];
+    const body = protoRequest([root, chat]);
+    const decoded = decodeTraceRequestProto(body);
+    expect(decoded[0].scopeSpans[0].spans[1].parentSpanId).toBe("aaaaaaaaaaaaaaaa");
+    expect(decoded[0].scopeSpans[0].spans[1].startTimeUnixNano).toBe(String(T0 + 100_000_000n));
+
+    const res = await fetch(server.url + "/api/public/otel/v1/traces", {
+      method: "POST",
+      headers: { ...auth, "content-type": "application/x-protobuf", "content-encoding": "gzip" },
+      body: gzipSync(body) as unknown as BodyInit,
+    });
+    expect(res.status).toBe(200);
+    const obs = await call("GET", `/api/public/v2/observations?traceId=${traceId}&fields=core,basic,model,usage`);
+    const gen = obs.body.data.find((o: any) => o.type === "GENERATION");
+    expect(gen).toMatchObject({ name: "chat gpt-4o", model: "gpt-4o", level: "ERROR", statusMessage: "boom", parentObservationId: "aaaaaaaaaaaaaaaa" });
+    expect(gen.usageDetails).toEqual({ input: 1000, output: 100, total: 1100 });
+    expect(gen.totalCost).toBeCloseTo(1000 * 0.0000025 + 100 * 0.00001, 10);
+    expect(gen.latency).toBeCloseTo(0.8, 5);
+    const raw = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM otlp_requests WHERE content_type = 'application/x-protobuf'");
+    expect(raw!.n).toBeGreaterThan(0);
+  });
+
+  test("OTLP/JSON with base64 ids, and experiment attributes become a run", async () => {
+    const b64 = (hex: string) => btoa(String.fromCharCode(...hexBytes(hex)));
+    const span = (id: string, item: string, output: string) => ({
+      traceId: b64(id.repeat(32).slice(0, 32)),
+      spanId: b64(id.repeat(16).slice(0, 16)),
+      name: "experiment-item-run",
+      startTimeUnixNano: String(T0),
+      endTimeUnixNano: String(T0 + 5_000_000n),
+      attributes: [
+        { key: "langfuse.observation.type", value: { stringValue: "span" } },
+        { key: "langfuse.observation.output", value: { stringValue: JSON.stringify(output) } },
+        { key: "langfuse.environment", value: { stringValue: "sdk-experiment" } },
+        { key: "langfuse.experiment.id", value: { stringValue: "exp-json-1" } },
+        { key: "langfuse.experiment.name", value: { stringValue: "json-run" } },
+        { key: "langfuse.experiment.item.id", value: { stringValue: item } },
+        { key: "langfuse.experiment.item.expected_output", value: { stringValue: JSON.stringify("Paris") } },
+      ],
+    });
+    const res = await call("POST", "/api/public/otel/v1/traces", {
+      resourceSpans: [{ resource: { attributes: [] }, scopeSpans: [{ scope: { name: "langfuse-sdk" }, spans: [span("c", "i1", "Paris"), span("d", "i2", "Lyon")] }] }],
+    });
+    expect(res.status).toBe(200);
+    const exps = await call("GET", "/api/public/experiments?fromStartTime=2020-01-01T00:00:00Z");
+    expect(exps.body.data.find((e: any) => e.id === "exp-json-1")).toMatchObject({ name: "json-run", itemCount: 2, datasetId: null });
+    const items = await call("GET", "/api/public/experiment-items?experimentId=exp-json-1&fromStartTime=2020-01-01T00:00:00Z&fields=io");
+    expect(items.body.data.map((i: any) => i.experimentItemId).sort()).toEqual(["i1", "i2"]);
+    expect(items.body.data[0].traceId).toMatch(/^[0-9a-f]{32}$/);
+  });
+});
+
+describe("scores", () => {
+  test("a batch stores what is valid and reports the rest with 207", async () => {
+    const res = await call("POST", "/api/public/scores", [
+      { id: "s1", name: "ok", value: 1, traceId: "11111111111111111111111111111111" },
+      { name: "missing target", value: 1 },
+    ]);
+    expect(res.status).toBe(207);
+    expect(res.body).toMatchObject({ accepted: 1, rejected: 1 });
+    const all = await call("POST", "/api/public/scores", [{ id: "s2", name: "flag", value: true, dataType: "BOOLEAN", sessionId: "sess" }]);
+    expect(all).toEqual({ status: 202, body: { message: "Accepted" } });
+    const scores = await call("GET", "/api/public/v3/scores?sessionId=sess&fields=subject");
+    expect(scores.body.data[0]).toMatchObject({ name: "flag", dataType: "BOOLEAN", value: true, subject: { kind: "session", id: "sess" } });
+  });
+
+  test("unknown filters are rejected like Langfuse does", async () => {
+    const res = await call("GET", "/api/public/v3/scores?nope=1");
+    expect(res.status).toBe(400);
+    expect(res.body.error[0].code).toBe("unrecognized_keys");
+  });
+});
+
+describe("datasets", () => {
+  test("create is an upsert by name; items keep their ids", async () => {
+    const a = await call("POST", "/api/public/v2/datasets", { name: "ds", description: "one" });
+    const b = await call("POST", "/api/public/v2/datasets", { name: "ds", description: "two" });
+    expect(b.body.id).toBe(a.body.id);
+    expect(b.body.description).toBe("two");
+    await call("POST", "/api/public/dataset-items", { datasetName: "ds", id: "item-1", input: { q: 1 }, expectedOutput: "a" });
+    await call("POST", "/api/public/dataset-items", { datasetName: "ds", id: "item-1", expectedOutput: "b" });
+    const items = await call("GET", "/api/public/dataset-items?datasetName=ds");
+    expect(items.body.meta).toMatchObject({ page: 1, totalItems: 1 });
+    expect(items.body.data[0]).toMatchObject({ id: "item-1", input: { q: 1 }, expectedOutput: "b", datasetName: "ds", status: "ACTIVE" });
+    expect((await call("GET", "/api/public/v2/datasets/nope")).status).toBe(404);
+  });
+});
+
+describe("misc", () => {
+  test("health, projects, viewer and unimplemented routes", async () => {
+    expect((await call("GET", "/api/public/health")).body.status).toBe("OK");
+    expect((await call("GET", "/api/public/projects")).body.data[0].id).toBe("local");
+    expect(await (await fetch(server.url + "/")).text()).toContain("<title>langfuse-lite</title>");
+    const prompts = await call("GET", "/api/public/v2/prompts");
+    expect(prompts.status).toBe(501);
+  });
+
+  test("push replays spans as OTLP/JSON and rewrites local dataset ids", async () => {
+    const localId = db.get<{ id: string }>("SELECT id FROM datasets WHERE name = 'ds'")!.id;
+    // A span that references the local dataset id, as the SDK's experiment runner does.
+    await call("POST", "/api/public/otel/v1/traces", {
+      resourceSpans: [{ scopeSpans: [{ scope: { name: "langfuse-sdk" }, spans: [{
+        traceId: "22222222222222222222222222222222", spanId: "2222222222222222", name: "run",
+        startTimeUnixNano: String(T0), endTimeUnixNano: String(T0),
+        attributes: [{ key: "langfuse.experiment.dataset.id", value: { stringValue: localId } }],
+      }] }] }],
+    });
+    const seen: { path: string; body: string }[] = [];
+    const target = Bun.serve({
+      port: 0,
+      async fetch(req) {
+        const path = new URL(req.url).pathname;
+        seen.push({ path, body: await req.text() });
+        if (path === "/api/public/projects") return Response.json({ data: [{ id: "p", name: "target" }] });
+        if (path === "/api/public/v2/datasets") return Response.json({ id: "remote-ds-id" });
+        return Response.json({});
+      },
+    });
+    try {
+      const report = await push(db, { baseUrl: `http://127.0.0.1:${target.port}`, publicKey: "pk", secretKey: "sk" });
+      expect(report.datasets).toBe(1);
+      const traces = seen.filter((s) => s.path === "/api/public/otel/v1/traces").map((s) => s.body).join("\n");
+      expect(traces).toContain("remote-ds-id");
+      expect(traces).not.toContain(localId);
+      // Second push: spans are not sent again.
+      seen.length = 0;
+      await push(db, { baseUrl: `http://127.0.0.1:${target.port}`, publicKey: "pk", secretKey: "sk" });
+      expect(seen.some((s) => s.path === "/api/public/otel/v1/traces")).toBe(false);
+    } finally {
+      target.stop(true);
+    }
+  });
+});
