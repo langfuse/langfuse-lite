@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { openDb, type Db } from "../src/db";
-import { exportViewer } from "../src/api";
+import { exportViewer, handle } from "../src/api";
 import { decodeTraceRequestProto } from "../src/otlp";
 import { push } from "../src/push";
 import { migrate } from "../src/schema";
@@ -198,20 +198,89 @@ describe("misc", () => {
     expect((await call("GET", "/api/lite/datasets/nope")).status).toBe(404);
   });
 
-  test("sql views use Langfuse's names: observations, and traces with the root's input", () => {
-    const obs = db.all<Record<string, unknown>>("SELECT * FROM observations WHERE trace_id = '11111111111111111111111111111111' AND type = 'GENERATION'");
-    expect(obs[0]).toMatchObject({ name: "chat gpt-4o", model: "gpt-4o", level: "ERROR", parent_observation_id: "aaaaaaaaaaaaaaaa" });
-    const trace = db.get<Record<string, unknown>>("SELECT * FROM traces WHERE id = '11111111111111111111111111111111'");
-    expect(trace).toHaveProperty("input");
+  test("one observations table with Langfuse's field names and derived usage, cost and latency", () => {
+    const obs = db.all<Record<string, any>>("SELECT * FROM observations WHERE trace_id = '11111111111111111111111111111111' AND type = 'GENERATION'");
+    expect(obs[0]).toMatchObject({ name: "chat gpt-4o", model: "gpt-4o", level: "ERROR", parent_observation_id: "aaaaaaaaaaaaaaaa",
+      input_usage: 1000, output_usage: 100, total_usage: 1100 });
+    expect(obs[0].latency_ms).toBeCloseTo(800, 0);
+    const tables = db.all<{ name: string }>("SELECT name FROM sqlite_master WHERE type IN ('table', 'view')").map((t) => t.name);
+    expect(tables).toContain("observations");
+    expect(tables).not.toContain("traces");
+    expect(tables).not.toContain("events");
+  });
+
+  test("root observations come with totals over their trace id; a tree holds every observation of one", async () => {
+    const roots = await call("GET", "/api/lite/roots");
+    const root = roots.body.data.find((r: any) => r.trace_id === "11111111111111111111111111111111");
+    expect(root).toMatchObject({ id: "aaaaaaaaaaaaaaaa", observation_count: 2, error_count: 1, total_tokens: 1100 });
+    const tree = await call("GET", "/api/lite/tree/bbbbbbbbbbbbbbbb"); // any observation's id finds its group
+    expect(tree.body.traceId).toBe("11111111111111111111111111111111");
+    expect(tree.body.observations).toHaveLength(2);
+  });
+
+  test("a database from before the rename migrates in place", async () => {
+    const old = await openDb(join(dir, "v1.db"));
+    old.exec(`CREATE TABLE events (id TEXT PRIMARY KEY, trace_id TEXT NOT NULL, parent_span_id TEXT, name TEXT NOT NULL,
+      type TEXT NOT NULL, environment TEXT NOT NULL, version TEXT, release TEXT, tags TEXT NOT NULL, public INTEGER NOT NULL,
+      is_app_root INTEGER NOT NULL, trace_name TEXT, user_id TEXT, session_id TEXT, level TEXT NOT NULL, status_message TEXT,
+      start_time TEXT NOT NULL, end_time TEXT, completion_start_time TEXT, prompt_name TEXT, prompt_version INTEGER, model_id TEXT,
+      provided_model_name TEXT, model_parameters TEXT NOT NULL, provided_usage_details TEXT NOT NULL, usage_details TEXT NOT NULL,
+      provided_cost_details TEXT NOT NULL, cost_details TEXT NOT NULL, total_cost REAL, usage_pricing_tier_id TEXT,
+      usage_pricing_tier_name TEXT, tool_definitions TEXT NOT NULL, tool_calls TEXT NOT NULL, tool_call_names TEXT NOT NULL,
+      input TEXT, output TEXT, metadata TEXT NOT NULL, source TEXT, ingestion_sdk_name TEXT, ingestion_sdk_version TEXT,
+      service_name TEXT, service_version TEXT, scope_name TEXT, scope_version TEXT, telemetry_sdk_language TEXT,
+      telemetry_sdk_name TEXT, telemetry_sdk_version TEXT, experiment_id TEXT, experiment_name TEXT, experiment_metadata TEXT NOT NULL,
+      experiment_description TEXT, experiment_dataset_id TEXT, experiment_item_id TEXT, experiment_item_version TEXT,
+      experiment_item_root_span_id TEXT, experiment_item_expected_output TEXT, experiment_item_metadata TEXT NOT NULL,
+      otlp_request_id INTEGER, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+      CREATE VIEW traces AS SELECT trace_id AS id FROM events GROUP BY trace_id;
+      INSERT INTO events VALUES ('s1','t1',NULL,'root','SPAN','default',NULL,NULL,'[]',0,0,NULL,NULL,NULL,'DEFAULT',NULL,
+        '2026-01-01T00:00:00.000Z','2026-01-01T00:00:01.000Z',NULL,NULL,NULL,NULL,'gpt-4o','{}','{}','{"input":5,"total":5}','{}','{}',
+        NULL,NULL,NULL,'{}','[]','[]',NULL,NULL,'{}',NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL,'{}',NULL,NULL,
+        NULL,NULL,NULL,NULL,'{}',NULL,'2026-01-01T00:00:00.000Z','2026-01-01T00:00:00.000Z');`);
+    migrate(old);
+    expect(old.get("SELECT model, parent_observation_id, input_usage, latency_ms FROM observations WHERE id = 's1'"))
+      .toEqual({ model: "gpt-4o", parent_observation_id: null, input_usage: 5, latency_ms: 1000 });
+    expect(old.get("SELECT 1 AS x FROM sqlite_master WHERE name IN ('events', 'traces')")).toBeUndefined();
+    migrate(old); // and every later start
+    expect(old.get("SELECT COUNT(*) AS n FROM observations")).toEqual({ n: 1 });
+    old.close();
+  });
+
+  test("load errors tell the user where to go for more volume", async () => {
+    const big = new Request("http://lite/api/public/otel/v1/traces", {
+      method: "POST", headers: { "content-type": "application/json", "content-length": String(70 * 1024 * 1024) }, body: "{}",
+    });
+    const res = await handle(db, big);
+    expect(res.status).toBe(413);
+    expect((await res.json()).message).toContain("Langfuse Cloud");
+
+    // Another process holding the write lock past the busy timeout.
+    const other = await openDb(join(dir, "lite.db"));
+    other.exec("BEGIN IMMEDIATE");
+    try {
+      const busy = await call("POST", "/api/public/scores", { name: "x", value: 1, traceId: "t" });
+      expect(busy.status).toBe(503);
+      expect(busy.body.message).toContain("self-host Langfuse");
+    } finally {
+      other.exec("ROLLBACK");
+      other.close();
+    }
+  }, 20000);
+
+  test("the CLI points v3 commands at their v4 equivalents", () => {
+    const run = Bun.spawnSync(["bun", "src/cli.ts", "traces", "--db", join(dir, "cli.db")], { stderr: "pipe" });
+    expect(run.exitCode).toBe(1);
+    expect(new TextDecoder().decode(run.stderr)).toContain("langfuse-lite observations");
   });
 
   test("export embeds the viewer's data in one HTML file", () => {
-    const { html, traces, runs } = exportViewer(db, 100);
-    expect(traces).toBeGreaterThan(0);
+    const { html, groups, runs } = exportViewer(db, 100);
+    expect(groups).toBeGreaterThan(0);
     expect(runs).toBeGreaterThan(0);
     const json = html.match(/window\.__LITE_DATA__ = (.*?);<\/script>/s)![1];
     const data = JSON.parse(json);
-    expect(Object.keys(data.details)).toContain("11111111111111111111111111111111");
+    expect(Object.keys(data.trees)).toContain("11111111111111111111111111111111");
     expect(data.compare.runs.map((r: any) => r.id)).toContain("exp-json-1");
     expect(data.datasets.map((d: any) => d.name)).toContain("ds");
     expect(Object.values(data.datasetDetails).some((d: any) => d.items.length === 1)).toBe(true);

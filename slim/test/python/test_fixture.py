@@ -17,4 +17,4 @@ def test_experiment_is_recorded(langfuse_lite_env):
     assert runs[0]["name"].startswith("fixture-exp")
     assert runs[0]["items"] == 2
     assert runs[0]["scores"] == {"correct": 0.5}
-    assert result.item_results[0].trace_id in langfuse_lite_env.cli("traces")
+    assert result.item_results[0].trace_id in langfuse_lite_env.cli("observations")

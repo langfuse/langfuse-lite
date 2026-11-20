@@ -5,6 +5,7 @@
 import type { Db, Param } from "./db";
 import { decompress, ingestTraceRequest } from "./ingest";
 import { findModelById, LANGFUSE_VERSION } from "./langfuse";
+import { isBusy, MAX_BODY_BYTES, noteRequestTime, SCALE_HINT } from "./limits";
 import { VIEWER_HTML } from "./viewer";
 
 export const PROJECT = { id: "local", name: "langfuse-lite" };
@@ -133,7 +134,7 @@ async function bodyJson(req: Request): Promise<Record<string, any>> {
 
 // ---------------------------------------------------------------- observations
 
-type EventRow = Record<string, any>;
+type ObservationRow = Record<string, any>;
 
 function modelPrices(modelId: string | null) {
   const tier = findModelById(modelId)?.pricingTiers.find((t) => t.isDefault);
@@ -145,14 +146,14 @@ const seconds = (a: string | null, b: string | null) =>
   a && b ? (new Date(b).getTime() - new Date(a).getTime()) / 1000 : null;
 const num = (v: unknown) => (typeof v === "number" ? v : null);
 
-export function formatObservation(r: EventRow, fields: Set<string>) {
+export function formatObservation(r: ObservationRow, fields: Set<string>) {
   const o: Record<string, unknown> = {
     id: r.id,
     traceId: r.trace_id,
     startTime: iso(r.start_time),
     endTime: iso(r.end_time),
     projectId: PROJECT.id,
-    parentObservationId: r.parent_span_id ?? null,
+    parentObservationId: r.parent_observation_id ?? null,
     type: r.type,
   };
   if (fields.has("basic")) {
@@ -166,7 +167,7 @@ export function formatObservation(r: EventRow, fields: Set<string>) {
       public: Boolean(r.public),
       userId: r.user_id ?? "",
       sessionId: r.session_id ?? "",
-      isRootObservation: r.parent_span_id == null,
+      isRootObservation: r.parent_observation_id == null,
     });
   }
   if (fields.has("time")) {
@@ -180,8 +181,8 @@ export function formatObservation(r: EventRow, fields: Set<string>) {
   if (fields.has("metadata")) o.metadata = metadataValues(r.metadata);
   if (fields.has("model")) {
     Object.assign(o, {
-      model: r.provided_model_name ?? "",
-      internalModelId: r.model_id ?? "",
+      model: r.model ?? "",
+      internalModelId: r.internal_model_id ?? "",
       modelParameters: parseJson(r.model_parameters) ?? {},
     });
   }
@@ -212,8 +213,8 @@ export function formatObservation(r: EventRow, fields: Set<string>) {
   Object.assign(o, {
     latency: latency === 0 ? zero : latency,
     timeToFirstToken: ttft === 0 ? zero : ttft,
-    modelId: fields.has("model") ? (r.model_id ?? null) : null,
-    ...modelPrices(fields.has("model") ? (r.model_id ?? null) : null),
+    modelId: fields.has("model") ? (r.internal_model_id ?? null) : null,
+    ...modelPrices(fields.has("model") ? (r.internal_model_id ?? null) : null),
   });
   return o;
 }
@@ -238,7 +239,7 @@ function listObservations(db: Db, q: URLSearchParams) {
   eq("userId", "user_id");
   eq("sessionId", "session_id");
   eq("level", "level");
-  eq("parentObservationId", "parent_span_id");
+  eq("parentObservationId", "parent_observation_id");
   eq("environment", "environment");
   eq("version", "version");
   eq("experimentId", "experiment_id");
@@ -246,9 +247,9 @@ function listObservations(db: Db, q: URLSearchParams) {
   const to = requireIsoParam(q, "toStartTime", false);
   if (from) where.push("start_time >= ?"), params.push(from);
   if (to) where.push("start_time < ?"), params.push(to);
-  const { rows, cursor } = page<EventRow>(
+  const { rows, cursor } = page<ObservationRow>(
     db,
-    { from: "events", where, params, time: "start_time", id: "id", select: "*, start_time AS __t, id AS __id" },
+    { from: "observations", where, params, time: "start_time", id: "id", select: "*, start_time AS __t, id AS __id" },
     q,
     limit,
   );
@@ -493,8 +494,8 @@ function listItems(db: Db, q: URLSearchParams) {
 
 // An experiment item is the root span of one item run: the span carrying the
 // experiment fields with no parent (the SDK's "experiment-item-run" span).
-const itemRoots = (a = "e") => `events ${a} WHERE ${a}.experiment_id IS NOT NULL AND ${a}.experiment_item_id IS NOT NULL
-  AND (${a}.id = ${a}.experiment_item_root_span_id OR (${a}.experiment_item_root_span_id IS NULL AND ${a}.parent_span_id IS NULL))`;
+const itemRoots = (a = "e") => `observations ${a} WHERE ${a}.experiment_id IS NOT NULL AND ${a}.experiment_item_id IS NOT NULL
+  AND (${a}.id = ${a}.experiment_item_root_observation_id OR (${a}.experiment_item_root_observation_id IS NULL AND ${a}.parent_observation_id IS NULL))`;
 
 function scoresFor(db: Db, column: "dataset_run_id" | "observation_id", id: string) {
   return db
@@ -559,7 +560,7 @@ function listExperimentItems(db: Db, q: URLSearchParams) {
     ["traceId", "trace_id"],
   ])
     if (q.get(param)) where.push(`${column} = ?`), params.push(q.get(param)!);
-  const { rows, cursor } = page<EventRow>(
+  const { rows, cursor } = page<ObservationRow>(
     db,
     { from: `(SELECT * FROM ${itemRoots()} AND ${where.join(" AND ")})`, where: [], params, time: "start_time", id: "id", select: "*, start_time AS __t, id AS __id" },
     q,
@@ -674,11 +675,11 @@ route("GET", "/api/public/experiment-items", ({ db, url }) => ok(listExperimentI
 
 // langfuse-lite's own endpoints, for the viewer.
 route("GET", "/", () => new Response(VIEWER_HTML, { headers: { "content-type": "text/html; charset=utf-8" } }));
-route("GET", "/api/lite/traces", ({ db, url }) => ok({ data: listTraces(db, limitOf(url.searchParams, 100, 1000)) }));
-route("GET", "/api/lite/traces/:id", ({ db, params }) => {
-  const detail = traceDetail(db, decodeURIComponent(params[0]));
-  if (!detail) throw notFound("Trace");
-  return ok(detail);
+route("GET", "/api/lite/roots", ({ db, url }) => ok({ data: listRoots(db, limitOf(url.searchParams, 100, 1000)) }));
+route("GET", "/api/lite/tree/:traceId", ({ db, params }) => {
+  const tree = observationTree(db, decodeURIComponent(params[0]));
+  if (!tree) throw notFound("Observations with this trace id");
+  return ok(tree);
 });
 route("GET", "/api/lite/experiments", ({ db }) => ok({ data: experimentSummaries(db) }));
 route("GET", "/api/lite/datasets", ({ db }) => ok({ data: datasetSummaries(db) }));
@@ -704,7 +705,13 @@ function publicKeyOf(req: Request): string | undefined {
 }
 
 export async function handle(db: Db, req: Request): Promise<Response> {
-  const res = await route_(db, req);
+  const started = performance.now();
+  const length = Number(req.headers.get("content-length") ?? 0);
+  const res =
+    length > MAX_BODY_BYTES
+      ? ok({ message: `Request body of ${(length / 1048576).toFixed(0)} MB exceeds langfuse-lite's ${MAX_BODY_BYTES / 1048576} MB limit. ${SCALE_HINT}`, error: "PayloadTooLarge" }, 413)
+      : await route_(db, req);
+  noteRequestTime(req.method, new URL(req.url).pathname, performance.now() - started);
   // Failed requests are logged: an SDK usually swallows them, so this is where they show up.
   if (res.status >= 400) {
     const body = await res.clone().text();
@@ -732,6 +739,11 @@ async function route_(db: Db, req: Request): Promise<Response> {
     return ok({ message: "Not found", error: "NotFound" }, 404);
   } catch (e) {
     if (e instanceof HttpError) return ok({ message: e.message, error: e.error }, e.status);
+    if (isBusy(e))
+      return ok({
+        message: `The database stayed locked for more than 5 s; another langfuse-lite process may be writing to the same file. ${SCALE_HINT}`,
+        error: "DatabaseBusy",
+      }, 503);
     const message = e instanceof Error ? e.message : String(e);
     return ok({ message, error: "InternalServerError" }, 500);
   }
@@ -739,17 +751,77 @@ async function route_(db: Db, req: Request): Promise<Response> {
 
 // ---------------------------------------------------------------- viewer data (also used by export)
 
-export function listTraces(db: Db, limit: number) {
-  return db.all<Record<string, any>>("SELECT * FROM traces ORDER BY start_time DESC LIMIT ?", limit);
+/** Observations whose parent is not in the database (normally: no parent), newest first,
+ * with totals over all observations that share their trace id. */
+export function listRoots(db: Db, limit: number) {
+  // Pick the newest roots first (start_time index), then aggregate only their groups.
+  return db.all<Record<string, any>>(
+    `WITH r AS (
+       SELECT id, trace_id, name, type, level, start_time, input, output FROM observations o
+       WHERE ${ROOT("o")} ORDER BY start_time DESC, id DESC LIMIT ?
+     ), g AS (
+       SELECT trace_id, COUNT(*) AS observation_count, SUM(level = 'ERROR') AS error_count,
+         SUM(COALESCE(total_cost, 0)) AS total_cost, SUM(COALESCE(total_usage, 0)) AS total_tokens,
+         MAX(trace_name) AS trace_name, MAX(user_id) AS user_id, MAX(session_id) AS session_id,
+         MAX(environment) AS environment, MAX(experiment_id) AS experiment_id,
+         MAX(COALESCE(end_time, start_time)) AS last_end
+       FROM observations WHERE trace_id IN (SELECT trace_id FROM r) GROUP BY trace_id
+     )
+     SELECT r.id, r.trace_id, COALESCE(g.trace_name, r.name) AS name, r.type, r.level, r.start_time,
+       g.last_end AS end_time, r.input, r.output, g.observation_count, g.error_count, g.total_cost,
+       g.total_tokens, g.user_id, g.session_id, g.environment, g.experiment_id
+     FROM r JOIN g ON g.trace_id = r.trace_id
+     ORDER BY r.start_time DESC, r.id DESC`,
+    limit,
+  );
 }
 
-export function traceDetail(db: Db, id: string) {
-  const rows = db.all<EventRow>("SELECT * FROM events WHERE trace_id = ? ORDER BY start_time, id", id);
-  if (!rows.length) return null;
+/** An observation without a parent in the database. */
+const ROOT = (a: string) =>
+  `(${a}.parent_observation_id IS NULL OR NOT EXISTS (SELECT 1 FROM observations p WHERE p.id = ${a}.parent_observation_id))`;
+
+export type ObservationFilter = {
+  traceId?: string;
+  name?: string;
+  type?: string;
+  level?: string;
+  experiment?: string;
+  since?: string;
+};
+
+/** Any observations matching the filters, newest first. */
+export function findObservations(db: Db, f: ObservationFilter, limit: number) {
+  const where: string[] = [];
+  const params: Param[] = [];
+  const add = (sql: string, v: string | undefined) => {
+    if (v != null) where.push(sql), params.push(v);
+  };
+  add("trace_id LIKE ? || '%'", f.traceId);
+  add("name = ?", f.name);
+  add("type = upper(?)", f.type);
+  add("level = upper(?)", f.level);
+  add("(experiment_id = ? OR experiment_name = ? OR experiment_name LIKE ? || ' - %')", f.experiment);
+  if (f.experiment) params.push(f.experiment, f.experiment);
+  add("start_time >= ?", f.since && new Date(f.since).toISOString());
+  return db.all<ObservationRow>(
+    `SELECT * FROM observations ${where.length ? "WHERE " + where.join(" AND ") : ""} ORDER BY start_time DESC, id DESC LIMIT ?`,
+    ...params,
+    limit,
+  );
+}
+
+/** Every observation sharing a trace id, with their scores; the id may be a prefix,
+ * or the id of one of the observations. */
+export function observationTree(db: Db, id: string) {
+  const traceId =
+    db.get<{ t: string }>("SELECT trace_id AS t FROM observations WHERE trace_id = ? LIMIT 1", id)?.t ??
+    db.get<{ t: string }>("SELECT trace_id AS t FROM observations WHERE id = ? LIMIT 1", id)?.t;
+  if (!traceId) return null;
+  const rows = db.all<ObservationRow>("SELECT * FROM observations WHERE trace_id = ? ORDER BY start_time, id", traceId);
   const all = new Set(OBSERVATION_FIELDS);
-  const scores = db.all<ScoreRow>("SELECT * FROM scores WHERE trace_id = ? ORDER BY timestamp", id);
+  const scores = db.all<ScoreRow>("SELECT * FROM scores WHERE trace_id = ? ORDER BY timestamp", traceId);
   return {
-    id,
+    traceId,
     observations: rows.map((r) => formatObservation(r, all)),
     scores: scores.map((s) => formatScore(s, new Set(["core", "details", "subject"]))),
   };
@@ -783,9 +855,9 @@ export function datasetDetail(db: Db, id: string) {
   const d = db.get<DatasetRow>("SELECT * FROM datasets WHERE id = ?", id);
   if (!d) return null;
   const items = db.all(`${ITEM_SELECT} WHERE i.dataset_id = ? ORDER BY i.created_at, i.id`, id).map(formatItem);
-  const traces = new Set(
+  const sourceTraceIds = new Set(
     db.all<{ id: string }>(
-      `SELECT DISTINCT trace_id AS id FROM events WHERE trace_id IN (SELECT source_trace_id FROM dataset_items WHERE dataset_id = ?)`,
+      `SELECT DISTINCT trace_id AS id FROM observations WHERE trace_id IN (SELECT source_trace_id FROM dataset_items WHERE dataset_id = ?)`,
       id,
     ).map((r) => r.id),
   );
@@ -800,32 +872,32 @@ export function datasetDetail(db: Db, id: string) {
       ...i,
       runCount: runsPerItem.get(i.id) ?? 0,
       // Only link a source trace that is in this database.
-      sourceTraceAvailable: Boolean(i.sourceTraceId && traces.has(i.sourceTraceId)),
+      sourceTraceAvailable: Boolean(i.sourceTraceId && sourceTraceIds.has(i.sourceTraceId)),
     })),
     runs: experimentSummaries(db).filter((r) => r.dataset_id === id),
   };
 }
 
 /** The viewer with its data embedded: one HTML file that works without a server. */
-export function exportViewer(db: Db, limit: number): { html: string; traces: number; runs: number } {
-  const traces = listTraces(db, limit);
+export function exportViewer(db: Db, limit: number): { html: string; groups: number; runs: number } {
+  const roots = listRoots(db, limit);
   const experiments = experimentSummaries(db);
-  // Traces of the exported runs are included even when older than the newest `limit`.
+  // The observations of the exported runs are included even when older than the newest `limit`.
   const runTraceIds = experiments.length
     ? db.all<{ trace_id: string }>(
-        `SELECT DISTINCT trace_id FROM events WHERE experiment_id IN (${experiments.map(() => "?").join(",")})`,
+        `SELECT DISTINCT trace_id FROM observations WHERE experiment_id IN (${experiments.map(() => "?").join(",")})`,
         ...experiments.map((e) => e.id),
       ).map((r) => r.trace_id)
     : [];
-  const details: Record<string, unknown> = {};
-  for (const id of new Set([...traces.map((t) => t.id), ...runTraceIds])) details[id] = traceDetail(db, id);
+  const trees: Record<string, unknown> = {};
+  for (const id of new Set([...roots.map((r) => r.trace_id), ...runTraceIds])) trees[id] = observationTree(db, id);
   const datasets = datasetSummaries(db);
   const datasetDetails: Record<string, unknown> = {};
   for (const d of datasets) datasetDetails[d.id] = datasetDetail(db, d.id);
   const data = {
     exportedAt: new Date().toISOString(),
-    traces,
-    details,
+    roots,
+    trees,
     experiments,
     datasets,
     datasetDetails,
@@ -833,7 +905,7 @@ export function exportViewer(db: Db, limit: number): { html: string; traces: num
   };
   const json = JSON.stringify(data).replace(/</g, "\\u003c");
   const html = VIEWER_HTML.replace("<script>", `<script>window.__LITE_DATA__ = ${json};</script>\n<script>`);
-  return { html, traces: Object.keys(details).length, runs: experiments.length };
+  return { html, groups: Object.keys(trees).length, runs: experiments.length };
 }
 
 // ---------------------------------------------------------------- run summaries (CLI, viewer)
@@ -842,7 +914,7 @@ export function experimentSummaries(db: Db) {
   return db
     .all<Record<string, any>>(
       `SELECT x.*, d.name AS dataset_name,
-         (SELECT SUM(COALESCE(total_cost, 0)) FROM events c WHERE c.experiment_id = x.id) AS total_cost
+         (SELECT SUM(COALESCE(total_cost, 0)) FROM observations c WHERE c.experiment_id = x.id) AS total_cost
        FROM (
          SELECT r.experiment_id AS id, MAX(r.experiment_name) AS name, MAX(r.experiment_dataset_id) AS dataset_id,
            MIN(r.start_time) AS start_time, COUNT(*) AS items,
@@ -861,7 +933,7 @@ function runScoreAverages(db: Db, experimentId: string) {
   const out: Record<string, number | string> = {};
   for (const s of db.all<{ name: string; avg: number | null; n: number }>(
     `SELECT s.name, AVG(s.value) AS avg, COUNT(*) AS n FROM scores s
-     JOIN events e ON e.id = s.observation_id WHERE e.experiment_id = ? AND s.value IS NOT NULL GROUP BY s.name`,
+     JOIN observations e ON e.id = s.observation_id WHERE e.experiment_id = ? AND s.value IS NOT NULL GROUP BY s.name`,
     experimentId,
   ))
     if (s.avg != null) out[s.name] = s.avg;
@@ -871,10 +943,10 @@ function runScoreAverages(db: Db, experimentId: string) {
 }
 
 export function resolveRun(db: Db, ref: string): string {
-  const exact = db.get<{ id: string }>("SELECT experiment_id AS id FROM events WHERE experiment_id = ? LIMIT 1", ref);
+  const exact = db.get<{ id: string }>("SELECT experiment_id AS id FROM observations WHERE experiment_id = ? LIMIT 1", ref);
   if (exact) return exact.id;
   const byName = db.all<{ id: string }>(
-    `SELECT experiment_id AS id, MIN(start_time) AS t FROM events WHERE experiment_name = ? OR experiment_name LIKE ? || ' - %'
+    `SELECT experiment_id AS id, MIN(start_time) AS t FROM observations WHERE experiment_name = ? OR experiment_name LIKE ? || ' - %'
      GROUP BY experiment_id ORDER BY t DESC`,
     ref,
     ref,
@@ -888,8 +960,8 @@ export function compareRuns(db: Db, refs: string[]) {
   const runIds = refs.map((r) => resolveRun(db, r));
   const items = new Map<string, Record<string, any>>();
   const runs = runIds.map((id) => {
-    const rows = db.all<EventRow>(
-      `SELECT r.*, (SELECT SUM(COALESCE(total_cost, 0)) FROM events c WHERE c.trace_id = r.trace_id) AS trace_cost
+    const rows = db.all<ObservationRow>(
+      `SELECT r.*, (SELECT SUM(COALESCE(total_cost, 0)) FROM observations c WHERE c.trace_id = r.trace_id) AS trace_cost
        FROM ${itemRoots("r")}
          AND r.experiment_id = ?`,
       id,

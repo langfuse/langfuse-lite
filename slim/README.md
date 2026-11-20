@@ -12,14 +12,19 @@ export LANGFUSE_BASE_URL=http://localhost:3000 LANGFUSE_PUBLIC_KEY=pk-lf-local L
 ```
 
 Then trace and run experiments with the Langfuse SDKs as usual, or send any
-OpenTelemetry traces to `http://localhost:3000/api/public/otel/v1/traces`.
+OpenTelemetry spans to `http://localhost:3000/api/public/otel/v1/traces`.
 Data goes to `./.langfuse/lite.db`. Open http://localhost:3000 for the viewer:
-traces (waterfall, input/output, usage and cost per step), datasets (items, their
-source traces and the runs made on each; read-only, datasets are managed in code)
-and experiments (runs compared item by item).
+observations (each run as a waterfall, input/output, usage and cost per step),
+datasets (items, the observations they came from and the runs made on each;
+read-only, datasets are managed in code) and experiments (runs compared item by item).
+
+**Data model:** Langfuse v4's. Everything is an observation (span, generation,
+agent, tool, retriever, …). Observations that belong together share a trace id,
+and trace-level attributes such as the trace name, user, session and tags are
+fields on the observations. There are no separate trace records.
 
 Not published to npm or PyPI yet; build locally (see Development).
-`python test/demo.py http://127.0.0.1:3000` writes demo data (agent traces and
+`python test/demo.py http://127.0.0.1:3000` writes demo data (support-agent runs and
 two comparable experiment runs) through the Python SDK.
 
 ## For agents: the commands
@@ -27,33 +32,38 @@ two comparable experiment runs) through the Python SDK.
 The commands read the database directly, so they work while the server runs or after.
 
 ```text
-$ langfuse-lite traces
-id                                name                 start                duration  obs  errors  tokens  cost
-3df3bfa506e976981d58e04c680d78e7  support-agent        2026-11-20 08:19:04  5ms       4    1       1280    $0.0038
+$ langfuse-lite observations                      # root observations, newest first, totals per trace id
+trace_id                          name           type   start                duration  obs  errors  tokens  cost
+478d02b45e251eadf418f4546f2e2827  support-agent  AGENT  2026-11-20 08:53:40  1.2s      5    1       4720    $0.0107
 
-$ langfuse-lite trace 3df3 --io
-trace 3df3bfa506e976981d58e04c680d78e7  ·  support-agent  ·  user user-7  ·  5ms  ·  1280 tokens  ·  $0.0038  ·  1 error
-└─ AGENT  agent  5ms   0c4a…
-   ├─ GENERATION  plan  gpt-4o  1200→80 tok  $0.0038  0ms   1bf5…
-   │    in:  [{"role": "user", "content": "Where is my refund?"}]
-   │    out: {"role": "assistant", "content": "Let me look it up."}
-   ├─ TOOL  lookup_refund  1ms   7e21…
-   └─ SPAN  notify  0ms  ERROR: SMTP timeout   9a0d…
-scores: helpfulness=0.8 "clear answer", resolved=yes, escalated=false (on 1bf5…)
+$ langfuse-lite observations --level ERROR --io   # filter: --level --name --type --trace --experiment --since
+id                trace_id                          type  name        level  status                        latency  input
+7d50e42ad29b51e1  478d02b45e251eadf418f4546f2e2827  TOOL  send_email  ERROR  SMTP timeout after 3 retries  140ms    {"user": "user-114"}
+
+$ langfuse-lite tree 478d02 --io                   # every observation sharing the trace id
+trace id 478d02b45e251eadf418f4546f2e2827  ·  support-agent  ·  user user-114  ·  5 observations  ·  1.2s  ·  4720 tokens  ·  $0.0107  ·  1 error
+└─ AGENT  support-agent  1.2s   d0a6d98b090f9e56
+     in:  {"message": "Can you email me the receipt?"}
+   ├─ GENERATION  plan  claude-sonnet-5-5  2010→64 tok  $0.0047  460ms   a8aa405e661c544b
+   ├─ RETRIEVER  search_help_center  71ms   ffd6f53e04956eca
+   ├─ TOOL  send_email  140ms  ERROR: SMTP timeout after 3 retries   7d50e42ad29b51e1
+   └─ GENERATION  answer  claude-sonnet-5-5  2550→96 tok  $0.0061  520ms   68fae723a6612efb
+scores: resolved=no, helpfulness=0.4 "tool failed, offered a workaround"
 
 $ langfuse-lite runs
 id                name                                dataset    items  errors  avg latency  cost       scores
 a4ea15d60fb5f964  capitals-exp - 2026-11-20T08:14:45Z  capitals   3              0ms          $0.000014  exact_match=0.667 accuracy=0.667
 
 $ langfuse-lite compare capitals-exp-v1 capitals-exp-v2     # by name (latest run) or id
-$ langfuse-lite sql "SELECT name, COUNT(*) FROM events WHERE level = 'ERROR' GROUP BY 1"
+$ langfuse-lite sql "SELECT name, SUM(input_usage), AVG(latency_ms) FROM observations WHERE type = 'GENERATION' GROUP BY name"
 $ langfuse-lite push --to https://cloud.langfuse.com --public-key pk-lf-… --secret-key sk-lf-…
 $ langfuse-lite export --out run.html     # the viewer and its data in one file, to open or send
 ```
 
 Every command takes `--json`. `--db <path>` (or `LANGFUSE_LITE_DB`) picks
 another database. Failed API requests are logged by `serve` on stderr, since
-SDKs usually swallow them.
+SDKs usually swallow them. `traces` and `trace` (Langfuse v3 terms) answer with
+the v4 command to use instead.
 
 ## Python: pytest fixture and `serve()`
 
@@ -64,7 +74,7 @@ fixtures: `langfuse_lite` (one server per session, temporary database) and
 ```python
 def test_my_agent(langfuse_lite_env):
     run_my_agent()                                    # traced with the Langfuse SDK as usual
-    assert "my-agent" in langfuse_lite_env.cli("traces")
+    assert "my-agent" in langfuse_lite_env.cli("observations")
 
 from langfuse_lite import serve
 with serve() as lite:                                 # free port, temporary database
@@ -100,10 +110,12 @@ media, annotation queues, and the legacy `/api/public/ingestion` endpoint.
   (`vendor/langfuse/`, MIT; `scripts/vendor-langfuse.sh` refreshes it). So OpenAI,
   Anthropic, Vercel AI SDK, OpenInference, OpenLLMetry and GenAI-semantic-convention
   spans map exactly as in Langfuse.
-- **One SQLite file.** `events` follows Langfuse v4's events table (one row per
-  observation, trace and experiment fields inline, same column names), plus
-  `scores`, `datasets`, `dataset_items` and a `traces` view. Query it with `sql`
-  or `sqlite3`.
+- **One SQLite file.** `observations` holds one row per observation, with
+  Langfuse's field names in snake_case (`trace_id`, `parent_observation_id`, `model`,
+  `usage_details`, …), trace-level and experiment fields inline, and derived columns
+  for plain SQL: `input_usage`, `output_usage`, `total_usage`, `input_cost`,
+  `output_cost`, `latency_ms`. Next to it: `scores`, `datasets`, `dataset_items`.
+  Query it with `sql` or `sqlite3`.
 - **Raw OTLP is kept.** Every request is stored as received (`otlp_requests`),
   so nothing is lost if the conversion misses something.
 - **`push`** replays the raw spans (as OTLP/JSON), datasets, items and scores into a
@@ -125,6 +137,8 @@ media, annotation queues, and the legacy `/api/public/ingestion` endpoint.
 | Memory | 60–70 MB |
 | Python SDK scenario (agent trace, 2 experiments, scores) | 0.6 s, readable at once (the Docker image: 4 s, then a few seconds of queue) |
 | Database | 660 KB for 205 observations, 80 scores and their raw OTLP |
+| Ingest (16 parallel senders, 50-span batches) | about 6,000 spans/s up to 350,000 observations (1.3 GB); no errors |
+| Reads while ingesting | root-observation list 25 ms, observation filters under 0.3 s at 350,000 observations |
 
 The Docker image with the full Langfuse, for comparison: 585 MB download, 2.4 GB
 memory, 12–15 s start.
@@ -174,12 +188,26 @@ variables from the environment.
 For a new Langfuse version: `LANGFUSE_IMAGE_TAG=<tag> scripts/vendor-langfuse.sh`,
 rebuild, run the conformance tests.
 
+## Load and limits
+
+langfuse-lite handles one request at a time on one SQLite file. Under more load it
+gets slower rather than failing: requests queue (p99 about 0.2 s at 16 parallel
+senders). It answers with an error, and points to Langfuse Cloud or a self-hosted
+Langfuse (with `push` to move the data), when:
+
+- a request body is over 64 MB (HTTP 413)
+- the database stays locked for more than 5 s, usually by a second langfuse-lite
+  process on the same file (HTTP 503)
+
+It logs a warning with the same pointer when a request takes more than 2 s, and at
+start when the database holds more than 1 million observations or 2 GB.
+
 ## Limits
 
-- Experiment runs, traces and scores only. Prompts are not served (experiments
-  that fetch prompts from Langfuse need a full Langfuse).
-- Trace-level fields are not propagated across a trace's observations the way
-  Langfuse's worker does; the SDKs already set them on every span.
+- Experiment runs, observations and scores only. Prompts are not served
+  (experiments that fetch prompts from Langfuse need a full Langfuse).
+- Trace-level attributes are not propagated to every observation with the same
+  trace id the way Langfuse's worker does; the SDKs already set them on every span.
 - Cost uses Langfuse's default model prices only; custom models need `push`.
 - One local user: any API key is accepted and requests run one at a time.
 - Not published yet: the npm and PyPI names (`langfuse-lite`) were free when checked.

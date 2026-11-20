@@ -1,7 +1,7 @@
 """langfuse-lite: a local Langfuse for experiment runs and agent tracing.
 
 The wheel ships the langfuse-lite executable for this platform. Use it from
-the command line (``langfuse-lite serve``, ``uvx langfuse-lite traces``) or
+the command line (``langfuse-lite serve``, ``uvx langfuse-lite observations``) or
 start a server from Python:
 
     from langfuse_lite import serve
@@ -82,7 +82,7 @@ class LangfuseLite:
                 "LANGFUSE_PUBLIC_KEY": "pk-lf-local", "LANGFUSE_SECRET_KEY": "sk-lf-local"}
 
     def cli(self, *args: str) -> str:
-        """Runs a langfuse-lite command (traces, trace, runs, compare, sql) on this server's database."""
+        """Runs a langfuse-lite command (observations, tree, runs, compare, sql) on this server's database."""
         out = subprocess.run([binary(), *args, "--db", self.db], capture_output=True, text=True, check=True)
         return out.stdout
 

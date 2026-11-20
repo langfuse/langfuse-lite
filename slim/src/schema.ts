@@ -1,11 +1,22 @@
-// The SQLite schema. `events` follows Langfuse v4's events table (one row per
-// observation, trace-level fields on every row, experiment fields inline);
-// column names match Langfuse's ClickHouse columns so queries read the same.
-// JSON columns hold JSON text. Times are ISO 8601 UTC strings.
+// The SQLite schema, on Langfuse v4's data model: `observations` holds one row
+// per observation. Observations that belong together share a trace_id; trace-level
+// attributes (trace_name, user_id, session_id, tags) sit on the observations that
+// set them. Experiment fields are inline. Column names follow Langfuse's
+// observation fields in snake_case. JSON columns hold JSON text; times are ISO 8601 UTC.
 
 import type { Db } from "./db";
 
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
+
+// Columns computed from others, for plain SQL: SUM(input_usage), AVG(latency_ms).
+const DERIVED: [string, string, string][] = [
+  ["input_usage", "INTEGER", "json_extract(usage_details, '$.input')"],
+  ["output_usage", "INTEGER", "json_extract(usage_details, '$.output')"],
+  ["total_usage", "INTEGER", "json_extract(usage_details, '$.total')"],
+  ["input_cost", "REAL", "json_extract(cost_details, '$.input')"],
+  ["output_cost", "REAL", "json_extract(cost_details, '$.output')"],
+  ["latency_ms", "REAL", "ROUND((julianday(end_time) - julianday(start_time)) * 86400000)"],
+];
 
 const DDL = `
 CREATE TABLE IF NOT EXISTS lite_meta (key TEXT PRIMARY KEY, value TEXT);
@@ -22,10 +33,10 @@ CREATE TABLE IF NOT EXISTS otlp_requests (
   pushed_at TEXT
 );
 
-CREATE TABLE IF NOT EXISTS events (
-  id TEXT PRIMARY KEY,            -- span id
-  trace_id TEXT NOT NULL,
-  parent_span_id TEXT,
+CREATE TABLE IF NOT EXISTS observations (
+  id TEXT PRIMARY KEY,            -- the OTel span id
+  trace_id TEXT NOT NULL,         -- groups the observations of one run
+  parent_observation_id TEXT,
   name TEXT NOT NULL,
   type TEXT NOT NULL,             -- SPAN, GENERATION, EVENT, AGENT, TOOL, CHAIN, RETRIEVER, EVALUATOR, EMBEDDING, GUARDRAIL
   environment TEXT NOT NULL,
@@ -44,8 +55,8 @@ CREATE TABLE IF NOT EXISTS events (
   completion_start_time TEXT,
   prompt_name TEXT,
   prompt_version INTEGER,
-  model_id TEXT,                  -- matched model in Langfuse's default prices
-  provided_model_name TEXT,
+  internal_model_id TEXT,         -- matched model in Langfuse's default prices
+  model TEXT,                     -- the model name the instrumentation reported
   model_parameters TEXT NOT NULL, -- JSON object
   provided_usage_details TEXT NOT NULL,
   usage_details TEXT NOT NULL,    -- JSON {usageType: units}, with total
@@ -77,17 +88,18 @@ CREATE TABLE IF NOT EXISTS events (
   experiment_dataset_id TEXT,
   experiment_item_id TEXT,
   experiment_item_version TEXT,
-  experiment_item_root_span_id TEXT,
+  experiment_item_root_observation_id TEXT,
   experiment_item_expected_output TEXT,
   experiment_item_metadata TEXT NOT NULL,
   otlp_request_id INTEGER REFERENCES otlp_requests(id),
   created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL
+  updated_at TEXT NOT NULL,
+  ${DERIVED.map(([name, type, expr]) => `${name} ${type} GENERATED ALWAYS AS (${expr}) VIRTUAL`).join(",\n  ")}
 );
-CREATE INDEX IF NOT EXISTS events_trace ON events (trace_id, start_time);
-CREATE INDEX IF NOT EXISTS events_start ON events (start_time);
-CREATE INDEX IF NOT EXISTS events_session ON events (session_id) WHERE session_id IS NOT NULL;
-CREATE INDEX IF NOT EXISTS events_experiment ON events (experiment_id, experiment_item_id) WHERE experiment_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS observations_trace ON observations (trace_id, start_time);
+CREATE INDEX IF NOT EXISTS observations_start ON observations (start_time);
+CREATE INDEX IF NOT EXISTS observations_session ON observations (session_id) WHERE session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS observations_experiment ON observations (experiment_id, experiment_item_id) WHERE experiment_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS scores (
   id TEXT PRIMARY KEY,
@@ -137,44 +149,33 @@ CREATE TABLE IF NOT EXISTS dataset_items (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS dataset_items_dataset ON dataset_items (dataset_id, created_at);
-
--- Views carry no data: they are dropped and recreated on every start, so their
--- definitions can change between versions.
-DROP VIEW IF EXISTS traces;
-DROP VIEW IF EXISTS observations;
-
--- One row per trace, for listing: trace-level fields come from whichever span set them.
-CREATE VIEW traces AS
-SELECT
-  trace_id AS id,
-  COALESCE(MAX(trace_name), MAX(CASE WHEN parent_span_id IS NULL THEN name END)) AS name,
-  MAX(CASE WHEN parent_span_id IS NULL THEN input END) AS input,
-  MAX(CASE WHEN parent_span_id IS NULL THEN output END) AS output,
-  MAX(user_id) AS user_id,
-  MAX(session_id) AS session_id,
-  MAX(environment) AS environment,
-  MIN(start_time) AS start_time,
-  MAX(COALESCE(end_time, start_time)) AS end_time,
-  COUNT(*) AS observation_count,
-  SUM(CASE WHEN level = 'ERROR' THEN 1 ELSE 0 END) AS error_count,
-  SUM(COALESCE(total_cost, 0)) AS total_cost,
-  SUM(COALESCE(json_extract(usage_details, '$.total'), 0)) AS total_tokens,
-  MAX(experiment_id) AS experiment_id
-FROM events
-GROUP BY trace_id;
-
--- events with Langfuse's names, for queries written the way Langfuse names things.
-CREATE VIEW observations AS
-SELECT
-  id, trace_id, parent_span_id AS parent_observation_id, type, name, level, status_message,
-  start_time, end_time, completion_start_time, provided_model_name AS model, model_id AS internal_model_id,
-  model_parameters, usage_details, cost_details, total_cost, input, output, metadata, environment, version,
-  release, tags, user_id, session_id, trace_name, prompt_name, prompt_version,
-  experiment_id, experiment_name, experiment_item_id, experiment_dataset_id
-FROM events;
 `;
 
+/** Schema 1 (builds before the rename) stored observations as `events`, with a
+ * `traces` and an `observations` view on top. Renames in place. */
+function migrateFromV1(db: Db) {
+  for (const v of db.all<{ name: string }>(
+    "SELECT name FROM sqlite_master WHERE type = 'view' AND name IN ('traces', 'observations')",
+  ))
+    db.exec(`DROP VIEW ${v.name}`);
+  const hasEvents = db.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'events'");
+  const hasObservations = db.get("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'observations'");
+  if (!hasEvents || hasObservations) return;
+  db.tx(() => {
+    db.exec(`ALTER TABLE events RENAME TO observations;
+      ALTER TABLE observations RENAME COLUMN parent_span_id TO parent_observation_id;
+      ALTER TABLE observations RENAME COLUMN provided_model_name TO model;
+      ALTER TABLE observations RENAME COLUMN model_id TO internal_model_id;
+      ALTER TABLE observations RENAME COLUMN experiment_item_root_span_id TO experiment_item_root_observation_id;
+      DROP INDEX IF EXISTS events_trace; DROP INDEX IF EXISTS events_start;
+      DROP INDEX IF EXISTS events_session; DROP INDEX IF EXISTS events_experiment;`);
+    for (const [name, type, expr] of DERIVED)
+      db.exec(`ALTER TABLE observations ADD COLUMN ${name} ${type} GENERATED ALWAYS AS (${expr}) VIRTUAL`);
+  });
+}
+
 export function migrate(db: Db) {
+  migrateFromV1(db);
   db.exec(DDL);
   db.run("INSERT OR REPLACE INTO lite_meta (key, value) VALUES ('schema_version', ?)", String(SCHEMA_VERSION));
 }

@@ -3,10 +3,13 @@
 
 import { handle } from "./api";
 import type { Db } from "./db";
+import { MAX_BODY_BYTES, SCALE_HINT } from "./limits";
 
 export type Server = { url: string; port: number; stop(): Promise<void> };
 
-const MAX_BODY = 64 * 1024 * 1024;
+// handle() answers oversized bodies with a 413 and the scaling hint; the runtimes'
+// own limits sit above that so the hint is what clients see.
+const MAX_BODY = MAX_BODY_BYTES * 2;
 
 export async function serve(db: Db, opts: { host: string; port: number }): Promise<Server> {
   const Bun = (globalThis as { Bun?: any }).Bun;
@@ -27,7 +30,8 @@ export async function serve(db: Db, opts: { host: string; port: number }): Promi
       for await (const chunk of req) {
         size += (chunk as Buffer).length;
         if (size > MAX_BODY) {
-          res.writeHead(413).end();
+          res.writeHead(413, { "content-type": "application/json" });
+          res.end(JSON.stringify({ message: `Request body too large. ${SCALE_HINT}`, error: "PayloadTooLarge" }));
           return;
         }
         chunks.push(chunk as Buffer);

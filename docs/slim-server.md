@@ -10,6 +10,9 @@ debugging local agent runs.**
   **vendored unchanged** from the Langfuse worker image (41 compiled files,
   `slim/scripts/vendor-langfuse.sh`), with small shims for Redis, ClickHouse, S3,
   env and logging. That removes most of the drift risk below.
+- Langfuse v4's data model throughout: one `observations` table, grouped by
+  trace id, no trace records (the first build had an `events` table and a
+  `traces` view; existing databases migrate on start).
 - Experiment runs are read through Langfuse v4's `/api/public/experiments` and
   `/api/public/experiment-items`; v4 turns off the older dataset-run endpoints.
 - The JS SDK (6.1.1) uses the same OTLP endpoint, sending OTLP/JSON; the
@@ -69,12 +72,14 @@ OTLP endpoint.
   datasets and scores into Langfuse Cloud or a self-hosted Langfuse, which then
   does the full processing (model matching, cost) and shows the full UI.
 - **Commands for agents**:
-  - `traces`: list recent traces.
-  - `trace <id>`: a tree with timings, errors, tokens and cost.
+  - `observations`: root observations with totals per trace id, or any
+    observations by level, name, type, trace id or run.
+  - `tree <trace id>`: all observations sharing a trace id, as a tree with
+    timings, errors, tokens and cost.
   - `runs`: list experiment runs.
   - `compare <runA> <runB>`: per item, outputs, scores, latency and cost side by side.
   - `sql`: run any query on the database.
-- **One static HTML page** for people: a trace tree and a run comparison.
+- **One static HTML page** for people: observation trees and a run comparison.
 - **Auth**: any key is accepted; one fixed project.
 
 Left out:
@@ -115,7 +120,7 @@ runs on Node and on Bun.
 
 The Docker image is the reference. A test suite sends the same SDK scripts to
 both and compares what the shared read endpoints return:
-- traces with generations, tools, errors and nesting
+- observations with generations, tools, errors and nesting
 - `run_experiment` with item and run evaluators, on a stored dataset and on local data
 - an agent's OTel trace
 
@@ -135,6 +140,6 @@ Run it in CI and when moving to a new Langfuse version.
 
 1. Server, SQLite schema, OTLP protobuf and JSON decoding.
 2. Span → observation conversion; experiment runs from span attributes; scores; datasets.
-3. Read endpoints, then `trace`, `runs`, `compare` and `sql`.
+3. Read endpoints, then `observations`, `tree`, `runs`, `compare` and `sql`.
 4. Conformance tests against the Docker image.
 5. `push`, the HTML page, then packaging (npm first, then PyPI wheels).

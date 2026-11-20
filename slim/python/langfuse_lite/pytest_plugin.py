@@ -2,7 +2,7 @@
 
     def test_my_agent(langfuse_lite_env):
         run_my_agent()                      # traced with the Langfuse SDK as usual
-        assert "my-agent" in langfuse_lite_env.cli("traces")
+        assert "my-agent" in langfuse_lite_env.cli("observations")
 
 ``langfuse_lite``: one server per test session, temporary database.
 ``langfuse_lite_env``: the same server, with LANGFUSE_* set for the test.

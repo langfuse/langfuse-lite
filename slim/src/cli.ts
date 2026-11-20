@@ -5,10 +5,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { compareRuns, experimentSummaries, exportViewer, formatObservation, formatScore, resolveRun } from "./api";
+import { compareRuns, experimentSummaries, exportViewer, findObservations, formatObservation, listRoots, observationTree, resolveRun } from "./api";
 import { openDb, type Db } from "./db";
 import { LANGFUSE_VERSION } from "./langfuse";
 import { push } from "./push";
+import { LARGE_DB_BYTES, LARGE_DB_OBSERVATIONS, SCALE_HINT } from "./limits";
 import { migrate } from "./schema";
 import { serve } from "./server";
 
@@ -17,33 +18,45 @@ export const VERSION = "0.1.0";
 const HELP = `langfuse-lite ${VERSION} (Langfuse ${LANGFUSE_VERSION} data model)
 
 A local Langfuse for experiment runs and agent tracing: one process, one SQLite
-file. Point the Langfuse SDKs at it with LANGFUSE_BASE_URL=http://localhost:3000
-(any keys work).
+file. Point the Langfuse SDKs (or any OpenTelemetry exporter) at it with
+LANGFUSE_BASE_URL=http://localhost:3000 (any keys work).
+
+Data model (Langfuse v4): observations. Observations that belong together share a
+trace id; trace-level attributes (trace name, user, session, tags) are fields on them.
 
 Usage: langfuse-lite <command> [options]
 
 Commands:
   serve                     Start the server (default port 3000)
-  traces                    List recent traces
-  trace <id>                Show a trace as a tree: timings, errors, tokens, cost
+  observations              List root observations, newest first, with totals over their trace id.
+                              With a filter, list every matching observation:
+                              --level ERROR  --name <n>  --type TOOL  --trace <id>  --experiment <run>  --since <time>
+  tree <id>                 All observations sharing a trace id, as a tree: timings, errors, tokens,
+                              cost (trace id, a prefix of one, or any observation's id)
   runs                      List experiment runs with their average scores
   compare <run> [<run>...]  Compare runs item by item (run id or name)
-  sql "<query>"             Run a read-only SQL query on the database. Tables and views:
-                              observations (one row per observation, Langfuse's names), traces,
-                              scores, datasets, dataset_items, events (observations as stored),
-                              otlp_requests (raw OTLP). Columns: sql "PRAGMA table_info(observations)"
+  sql "<query>"             Read-only SQL. Tables: observations (one row per observation; derived columns
+                              input_usage, output_usage, total_usage, input_cost, output_cost, latency_ms),
+                              scores, datasets, dataset_items, otlp_requests (raw OTLP).
+                              Columns: sql "PRAGMA table_info(observations)"
   export [--out <file>]     Write the viewer with its data as one HTML file (default langfuse-lite.html)
   push --to <url>           Copy everything to a Langfuse (Cloud or self-hosted)
 
 Options:
   --db <path>       Database file (default: $LANGFUSE_LITE_DB or ./.langfuse/lite.db)
   --json            Machine-readable output
+  --io              observations, tree: also print input and output
+  --limit <n>       observations: how many (default 20); export: newest root observations (default 100)
   --port <n>        serve: port (default 3000, or $PORT)
   --host <h>        serve: host (default 127.0.0.1)
-  --limit <n>       traces: how many (default 20); export: newest traces to include (default 100)
-  --io              trace: also print each observation's input and output
   --public-key, --secret-key   push: target keys (or LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY)
 `;
+
+// Commands from Langfuse v3's trace model, pointed at their v4 equivalents.
+const RENAMED: Record<string, string> = {
+  traces: 'there is no "traces" command: like Langfuse v4, everything is an observation. Use "langfuse-lite observations" (root observations, one per trace id) or filter, e.g. --level ERROR',
+  trace: 'there is no "trace" command: like Langfuse v4, everything is an observation. Use "langfuse-lite tree <trace id>" for all observations that share a trace id',
+};
 
 function dbPath(arg?: string) {
   return path.resolve(arg ?? process.env.LANGFUSE_LITE_DB ?? path.join(process.cwd(), ".langfuse", "lite.db"));
@@ -74,48 +87,91 @@ function table(rows: Record<string, unknown>[], cols: string[]) {
   return [line(Object.fromEntries(cols.map((c) => [c, c]))), ...rows.map(line)].join("\n");
 }
 
-function cmdTraces(db: Db, o: { limit: number; json: boolean }) {
-  const rows = db.all<Record<string, any>>("SELECT * FROM traces ORDER BY start_time DESC LIMIT ?", o.limit);
-  if (o.json) return console.log(JSON.stringify(rows, null, 2));
-  if (!rows.length) return console.log("No traces yet. Point an SDK at the server: LANGFUSE_BASE_URL=http://localhost:3000");
+type ListOptions = { limit: number; json: boolean; io: boolean; level?: string; name?: string; type?: string;
+  trace?: string; experiment?: string; since?: string };
+
+function cmdObservations(db: Db, o: ListOptions) {
+  const filtered = Boolean(o.level || o.name || o.type || o.trace || o.experiment || o.since);
+  if (!filtered) {
+    const rows = listRoots(db, o.limit);
+    if (o.json) return console.log(JSON.stringify(rows, null, 2));
+    if (!rows.length)
+      return console.log("No observations yet. Point an SDK at the server: LANGFUSE_BASE_URL=http://localhost:3000");
+    console.log(
+      table(
+        rows.map((r) => ({
+          trace_id: r.trace_id,
+          name: short(r.name ?? "", 36),
+          type: r.type,
+          start: String(r.start_time).replace("T", " ").slice(0, 19),
+          duration: dur(secondsBetween(r.start_time, r.end_time)),
+          obs: r.observation_count,
+          errors: r.error_count || "",
+          tokens: r.total_tokens || "",
+          cost: money(r.total_cost),
+          experiment: r.experiment_id ?? "",
+          ...(o.io ? { input: short(r.input, 70), output: short(r.output, 70) } : {}),
+        })),
+        ["trace_id", "name", "type", "start", "duration", "obs", "errors", "tokens", "cost", "experiment", ...(o.io ? ["input", "output"] : [])],
+      ),
+    );
+    console.log(`\n${rows.length} root observations. Drill into one: langfuse-lite tree <trace_id>`);
+    return;
+  }
+  const rows = findObservations(db, o, o.limit);
+  const all = new Set(["core", "basic", "time", "io", "model", "usage"]);
+  if (o.json) return console.log(JSON.stringify(rows.map((r) => formatObservation(r, all)), null, 2));
+  if (!rows.length) return console.log("No observations match.");
   console.log(
     table(
       rows.map((r) => ({
         id: r.id,
-        name: short(r.name ?? "", 40),
+        trace_id: r.trace_id,
+        type: r.type,
+        name: short(r.name, 30),
+        level: r.level === "DEFAULT" ? "" : r.level,
+        status: short(r.status_message ?? "", 40),
         start: String(r.start_time).replace("T", " ").slice(0, 19),
-        duration: dur(secondsBetween(r.start_time, r.end_time)),
-        obs: r.observation_count,
-        errors: r.error_count || "",
-        tokens: r.total_tokens || "",
+        latency: dur(r.latency_ms == null ? null : r.latency_ms / 1000),
+        model: r.model ?? "",
+        tokens: r.total_usage ?? "",
         cost: money(r.total_cost),
-        experiment: r.experiment_id ?? "",
+        ...(o.io ? { input: short(r.input, 70), output: short(r.output, 70) } : {}),
       })),
-      ["id", "name", "start", "duration", "obs", "errors", "tokens", "cost", "experiment"],
+      ["id", "trace_id", "type", "name", "level", "status", "start", "latency", "model", "tokens", "cost", ...(o.io ? ["input", "output"] : [])],
     ),
   );
 }
 
-function cmdTrace(db: Db, id: string | undefined, o: { json: boolean; io: boolean }) {
-  if (!id) throw new Error("usage: langfuse-lite trace <trace id>");
-  const match = db.all<{ trace_id: string }>("SELECT DISTINCT trace_id FROM events WHERE trace_id LIKE ? || '%' LIMIT 2", id);
-  if (!match.length) throw new Error(`no trace ${id}`);
-  if (match.length > 1) throw new Error(`"${id}" matches more than one trace; give more characters`);
-  const traceId = match[0].trace_id;
-  const all = new Set(["core", "basic", "time", "io", "metadata", "model", "usage", "prompt"]);
-  const obs = db.all<Record<string, any>>("SELECT * FROM events WHERE trace_id = ? ORDER BY start_time, id", traceId).map((r) => formatObservation(r, all));
-  const scores = db.all("SELECT * FROM scores WHERE trace_id = ? ORDER BY timestamp", traceId).map((s) => formatScore(s, new Set(["core", "details", "subject"])));
-  if (o.json) return console.log(JSON.stringify({ id: traceId, observations: obs, scores }, null, 2));
-  const t = db.get<Record<string, any>>("SELECT * FROM traces WHERE id = ?", traceId)!;
+function cmdTree(db: Db, id: string | undefined, o: { json: boolean; io: boolean }) {
+  if (!id) throw new Error("usage: langfuse-lite tree <trace id, or the id of one of its observations>");
+  const match = db.all<{ trace_id: string }>(
+    "SELECT DISTINCT trace_id FROM observations WHERE trace_id LIKE ? || '%' OR id = ? LIMIT 2", id, id);
+  if (!match.length) throw new Error(`no observations with trace id or id ${id}`);
+  if (match.length > 1) throw new Error(`"${id}" matches more than one trace id; give more characters`);
+  const tree = observationTree(db, match[0].trace_id)!;
+  if (o.json) return console.log(JSON.stringify(tree, null, 2));
+  const obs = tree.observations as any[];
+  const scores = tree.scores as any[];
+  const start = Math.min(...obs.map((x) => +new Date(x.startTime)));
+  const end = Math.max(...obs.map((x) => +new Date(x.endTime ?? x.startTime)));
+  const tokens = obs.reduce((a, x) => a + (x.totalUsage || 0), 0);
+  const cost = obs.reduce((a, x) => a + (x.totalCost || 0), 0);
+  const errors = obs.filter((x) => x.level === "ERROR").length;
+  const meta = db.get<Record<string, any>>(
+    "SELECT MAX(trace_name) AS name, MAX(user_id) AS user_id, MAX(session_id) AS session_id FROM observations WHERE trace_id = ?",
+    tree.traceId,
+  )!;
   const head = [
-    `trace ${traceId}`,
-    t.name,
-    t.user_id && `user ${t.user_id}`,
-    t.session_id && `session ${t.session_id}`,
-    dur(secondsBetween(t.start_time, t.end_time)),
-    t.total_tokens ? `${t.total_tokens} tokens` : "",
-    money(t.total_cost),
-    t.error_count ? `${t.error_count} error${t.error_count > 1 ? "s" : ""}` : "",
+    `trace id ${tree.traceId}`,
+    meta.name,
+    meta.user_id && `user ${meta.user_id}`,
+    meta.session_id && `session ${meta.session_id}`,
+    `${obs.length} observations`,
+    dur((end - start) / 1000),
+    tokens ? `${tokens} tokens` : "",
+    money(cost),
+    errors ? `${errors} error${errors > 1 ? "s" : ""}` : "",
   ].filter(Boolean);
   console.log(head.join("  ·  "));
   const ids = new Set(obs.map((x) => x.id));
@@ -207,15 +263,19 @@ function cmdSql(db: Db, query: string | undefined, o: { json: boolean }) {
       const tables = db.all<{ name: string; type: string }>(
         "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' AND name != 'lite_meta' ORDER BY name",
       );
+      const v4 = /no such table: traces\b/.test(message)
+        ? "\n  like Langfuse v4 there is no traces table: group observations by trace_id, e.g." +
+          "\n  SELECT trace_id, MAX(trace_name), COUNT(*), SUM(level = 'ERROR') FROM observations GROUP BY trace_id"
+        : "";
       throw new Error(
-        `${message}\n  tables and views: ${tables.map((t) => t.name).join(", ")}` +
+        `${message}${v4}\n  tables: ${tables.map((t) => t.name).join(", ")}` +
           `\n  columns of one: langfuse-lite sql "PRAGMA table_info(observations)"`,
       );
     }
     throw e;
   }
   if (o.json || !rows.length) return console.log(JSON.stringify(rows, null, 2));
-  console.log(table(rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, short(v ?? "", 60)]))), Object.keys(rows[0])));
+  console.log(table(rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, short(v ?? "", 120)]))), Object.keys(rows[0])));
 }
 
 export async function main(argv = process.argv.slice(2)) {
@@ -229,6 +289,12 @@ export async function main(argv = process.argv.slice(2)) {
       host: { type: "string", default: "127.0.0.1" },
       limit: { type: "string" },
       out: { type: "string" },
+      level: { type: "string" },
+      name: { type: "string" },
+      type: { type: "string" },
+      trace: { type: "string" },
+      experiment: { type: "string" },
+      since: { type: "string" },
       io: { type: "boolean", default: false },
       to: { type: "string" },
       "public-key": { type: "string" },
@@ -250,6 +316,10 @@ export async function main(argv = process.argv.slice(2)) {
         const server = await serve(db, { host: o.host!, port });
         console.log(`langfuse-lite ${VERSION} listening on ${server.url}  (data: ${file})`);
         console.log(`  LANGFUSE_BASE_URL=${server.url} LANGFUSE_PUBLIC_KEY=pk-lf-local LANGFUSE_SECRET_KEY=sk-lf-local`);
+        const n = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM observations")!.n;
+        const bytes = fs.statSync(file).size;
+        if (n > LARGE_DB_OBSERVATIONS || bytes > LARGE_DB_BYTES)
+          console.error(`warning: this database holds ${n.toLocaleString("en")} observations (${(bytes / 1e9).toFixed(1)} GB). ${SCALE_HINT}`);
         await new Promise<void>((resolve) => {
           const stop = () => resolve();
           process.once("SIGINT", stop);
@@ -258,10 +328,13 @@ export async function main(argv = process.argv.slice(2)) {
         await server.stop();
         return;
       }
-      case "traces":
-        return cmdTraces(db, { limit: Number(o.limit ?? 20), json: o.json! });
-      case "trace":
-        return cmdTrace(db, rest[0], { json: o.json!, io: o.io! });
+      case "observations":
+        return cmdObservations(db, {
+          limit: Number(o.limit ?? 20), json: o.json!, io: o.io!, level: o.level, name: o.name, type: o.type,
+          trace: o.trace, experiment: o.experiment, since: o.since,
+        });
+      case "tree":
+        return cmdTree(db, rest[0], { json: o.json!, io: o.io! });
       case "runs":
         return cmdRuns(db, { json: o.json! });
       case "compare":
@@ -270,9 +343,9 @@ export async function main(argv = process.argv.slice(2)) {
         return cmdSql(db, rest.join(" "), { json: o.json! });
       case "export": {
         const out = path.resolve(o.out ?? "langfuse-lite.html");
-        const { html, traces, runs } = exportViewer(db, Number(o.limit ?? 100));
+        const { html, groups, runs } = exportViewer(db, Number(o.limit ?? 100));
         fs.writeFileSync(out, html);
-        console.log(`Wrote ${out}: ${traces} traces, ${runs} experiment runs, ${(html.length / 1024).toFixed(0)} KB. Open it in a browser; no server needed.`);
+        console.log(`Wrote ${out}: ${groups} observation trees, ${runs} experiment runs, ${(html.length / 1024).toFixed(0)} KB. Open it in a browser; no server needed.`);
         return;
       }
       case "push": {
@@ -285,7 +358,7 @@ export async function main(argv = process.argv.slice(2)) {
         return;
       }
       default:
-        throw new Error(`unknown command "${command}"; see langfuse-lite --help`);
+        throw new Error(RENAMED[command] ?? `unknown command "${command}"; see langfuse-lite --help`);
     }
   } finally {
     db.close();

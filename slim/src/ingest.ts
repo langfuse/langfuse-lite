@@ -1,4 +1,4 @@
-// OTLP request → Langfuse events → SQLite rows. Mirrors the Langfuse worker:
+// OTLP request → Langfuse observations → SQLite rows. Mirrors the Langfuse worker:
 // OtelIngestionProcessor.processToEvent, then IngestionService.createEventRecord
 // (without prompt lookup, skill references and AI-gateway attribution).
 
@@ -29,7 +29,7 @@ export type SdkHeaders = { publicKey?: string; sdkName?: string; sdkVersion?: st
 /** Stores one OTLP request and its spans; returns the number of observations written. */
 export function ingestTraceRequest(db: Db, body: Uint8Array, contentType: string, headers: SdkHeaders): number {
   const resourceSpans = decodeTraceRequest(body, contentType);
-  const events = processSpans(resourceSpans, headers);
+  const observations = processSpans(resourceSpans, headers);
   return db.tx(() => {
     db.run(
       "INSERT INTO otlp_requests (received_at, content_type, headers, body, span_count) VALUES (?, ?, ?, ?, ?)",
@@ -37,11 +37,11 @@ export function ingestTraceRequest(db: Db, body: Uint8Array, contentType: string
       contentType.includes("json") ? "application/json" : "application/x-protobuf",
       json(headers),
       body,
-      events.length,
+      observations.length,
     );
     const requestId = (db.get<{ id: number }>("SELECT last_insert_rowid() AS id") as { id: number }).id;
-    for (const event of events) writeEvent(db, event, requestId);
-    return events.length;
+    for (const o of observations) writeObservation(db, o, requestId);
+    return observations.length;
   });
 }
 
@@ -63,23 +63,23 @@ const pairsToObject = (names: unknown, values: unknown) =>
   Array.isArray(names) && Array.isArray(values) ? Object.fromEntries(names.map((n, i) => [n, values[i] ?? ""])) : {};
 
 const COLUMNS = [
-  "id", "trace_id", "parent_span_id", "name", "type", "environment", "version", "release", "tags", "public",
+  "id", "trace_id", "parent_observation_id", "name", "type", "environment", "version", "release", "tags", "public",
   "is_app_root", "trace_name", "user_id", "session_id", "level", "status_message", "start_time", "end_time",
-  "completion_start_time", "prompt_name", "prompt_version", "model_id", "provided_model_name", "model_parameters",
+  "completion_start_time", "prompt_name", "prompt_version", "internal_model_id", "model", "model_parameters",
   "provided_usage_details", "usage_details", "provided_cost_details", "cost_details", "total_cost",
   "usage_pricing_tier_id", "usage_pricing_tier_name", "tool_definitions", "tool_calls", "tool_call_names", "input",
   "output", "metadata", "source", "ingestion_sdk_name", "ingestion_sdk_version", "service_name", "service_version",
   "scope_name", "scope_version", "telemetry_sdk_language", "telemetry_sdk_name", "telemetry_sdk_version",
   "experiment_id", "experiment_name", "experiment_metadata", "experiment_description", "experiment_dataset_id",
-  "experiment_item_id", "experiment_item_version", "experiment_item_root_span_id",
+  "experiment_item_id", "experiment_item_version", "experiment_item_root_observation_id",
   "experiment_item_expected_output", "experiment_item_metadata", "otlp_request_id", "created_at", "updated_at",
 ] as const;
-const UPSERT = `INSERT INTO events (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map(() => "?").join(", ")})
+const UPSERT = `INSERT INTO observations (${COLUMNS.join(", ")}) VALUES (${COLUMNS.map(() => "?").join(", ")})
   ON CONFLICT(id) DO UPDATE SET ${COLUMNS.filter((c) => c !== "id" && c !== "created_at")
     .map((c) => `${c} = excluded.${c}`)
     .join(", ")}`;
 
-function writeEvent(db: Db, e: LangfuseEvent, requestId: number) {
+function writeObservation(db: Db, e: LangfuseEvent, requestId: number) {
   const ev = e as Record<string, any>;
   const modelParameters = parseModelParameters(ev.modelParameters);
   const metadata = ev.metadata ?? {};
@@ -100,7 +100,7 @@ function writeEvent(db: Db, e: LangfuseEvent, requestId: number) {
   const row: Record<(typeof COLUMNS)[number], string | number | null> = {
     id: e.spanId,
     trace_id: e.traceId,
-    parent_span_id: e.parentSpanId ?? null,
+    parent_observation_id: e.parentSpanId ?? null,
     name: ev.name ?? "",
     type: ev.type ?? "SPAN",
     environment: ev.environment ?? "default",
@@ -119,8 +119,8 @@ function writeEvent(db: Db, e: LangfuseEvent, requestId: number) {
     completion_start_time: ev.completionStartTime ?? null,
     prompt_name: ev.promptName ?? null,
     prompt_version: ev.promptVersion == null ? null : Number(ev.promptVersion) || null,
-    model_id: usage?.internal_model_id ?? null,
-    provided_model_name: ev.modelName ?? null,
+    internal_model_id: usage?.internal_model_id ?? null,
+    model: ev.modelName ?? null,
     model_parameters: json(modelParameters),
     provided_usage_details: json(providedUsage),
     usage_details: json(usage?.usage_details ?? ev.usageDetails ?? {}),
@@ -152,7 +152,7 @@ function writeEvent(db: Db, e: LangfuseEvent, requestId: number) {
     experiment_dataset_id: ev.experimentDatasetId ?? null,
     experiment_item_id: ev.experimentItemId ?? null,
     experiment_item_version: ev.experimentItemVersion == null ? null : String(ev.experimentItemVersion),
-    experiment_item_root_span_id: ev.experimentItemRootSpanId ?? null,
+    experiment_item_root_observation_id: ev.experimentItemRootSpanId ?? null,
     experiment_item_expected_output: ev.experimentItemExpectedOutput ?? null,
     experiment_item_metadata: json(pairsToObject(ev.experimentItemMetadataNames, ev.experimentItemMetadataValues)),
     otlp_request_id: requestId,
