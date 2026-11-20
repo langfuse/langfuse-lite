@@ -19,6 +19,14 @@ observations (each run as a waterfall, input/output, usage and cost per step),
 datasets (items, the observations they came from and the runs made on each;
 read-only, datasets are managed in code) and experiments (runs compared item by item).
 
+![Observations: a support-agent run as a waterfall, with the failing tool call selected](docs/images/observations.png)
+
+| Datasets | Experiments |
+|---|---|
+| ![Datasets: a dataset's items and the experiment runs made on it](docs/images/datasets.png) | ![Experiments: two runs compared item by item, with scores per item](docs/images/experiments.png) |
+
+<sub>Screenshots show the demo data from `test/demo.py`.</sub>
+
 **Data model:** Langfuse v4's. Everything is an observation (span, generation,
 agent, tool, retriever, …). Observations that belong together share a trace id,
 and trace-level attributes such as the trace name, user, session and tags are
