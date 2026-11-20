@@ -66,7 +66,8 @@ h2 { font-size: 16px; margin: 0 0 4px; }
 .node:last-child { border-bottom: 0; }
 .node:hover, .node.sel { background: var(--accent-soft); }
 .node .label { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.node .type { font-size: 10px; font-weight: 700; margin-right: 6px; color: var(--c, var(--muted)); }
+.node .type { font-size: 10px; font-weight: 700; margin-right: 6px; color: var(--c, var(--muted)); display: inline-flex; align-items: center; gap: 4px; vertical-align: -2px; }
+.node .type .ti { flex: none; }
 [data-type] { --c: var(--obs-span); }
 [data-type="TRACE"] { --c: var(--obs-trace); } [data-type="GENERATION"] { --c: var(--obs-generation); }
 [data-type="EVENT"] { --c: var(--obs-event); } [data-type="AGENT"] { --c: var(--obs-agent); }
@@ -141,6 +142,9 @@ const api = async (p) => {
   if (!r.ok) throw new Error((await r.json()).message);
   return r.json();
 };
+// Langfuse's icon per observation type (Lucide icons, as in Langfuse's ItemBadge).
+const TYPE_ICONS = {"TRACE": "<path d=\"M8 5h13\"/><path d=\"M13 12h8\"/><path d=\"M13 19h8\"/><path d=\"M3 10a2 2 0 0 0 2 2h3\"/><path d=\"M3 5v12a2 2 0 0 0 2 2h3\"/>","GENERATION": "<path d=\"M10.827 16.379a6.082 6.082 0 0 1-8.618-7.002l5.412 1.45a6.082 6.082 0 0 1 7.002-8.618l-1.45 5.412a6.082 6.082 0 0 1 8.618 7.002l-5.412-1.45a6.082 6.082 0 0 1-7.002 8.618l1.45-5.412Z\"/><path d=\"M12 12v.01\"/>","EVENT": "<circle cx=\"12\" cy=\"12\" r=\"10\"/><circle cx=\"12\" cy=\"12\" r=\"1\"/>","SPAN": "<path d=\"m18 8 4 4-4 4\"/><path d=\"M2 12h20\"/><path d=\"m6 8-4 4 4 4\"/>","AGENT": "<path d=\"M12 8V4H8\"/><rect width=\"16\" height=\"12\" x=\"4\" y=\"8\" rx=\"2\"/><path d=\"M2 14h2\"/><path d=\"M20 14h2\"/><path d=\"M15 13v2\"/><path d=\"M9 13v2\"/>","TOOL": "<path d=\"M14.7 6.3a1 1 0 0 0 0 1.4l1.6 1.6a1 1 0 0 0 1.4 0l3.106-3.105c.32-.322.863-.22.983.218a6 6 0 0 1-8.259 7.057l-7.91 7.91a1 1 0 0 1-2.999-3l7.91-7.91a6 6 0 0 1 7.057-8.259c.438.12.54.662.219.984z\"/>","CHAIN": "<path d=\"M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71\"/><path d=\"M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71\"/>","RETRIEVER": "<path d=\"m21 21-4.34-4.34\"/><circle cx=\"11\" cy=\"11\" r=\"8\"/>","EMBEDDING": "<path d=\"M12.83 2.18a2 2 0 0 0-1.66 0L2.6 6.08a1 1 0 0 0 0 1.83l8.58 3.91a2 2 0 0 0 1.66 0l8.58-3.9a1 1 0 0 0 0-1.83z\"/><path d=\"M2 12a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 12\"/><path d=\"M2 17a1 1 0 0 0 .58.91l8.6 3.91a2 2 0 0 0 1.65 0l8.58-3.9A1 1 0 0 0 22 17\"/>","GUARDRAIL": "<path d=\"M20 13c0 5-3.5 7.5-7.66 8.95a1 1 0 0 1-.67-.01C7.5 20.5 4 18 4 13V6a1 1 0 0 1 1-1c2 0 4.5-1.2 6.24-2.72a1.17 1.17 0 0 1 1.52 0C14.51 3.81 17 5 19 5a1 1 0 0 1 1 1z\"/><path d=\"m9 12 2 2 4-4\"/>","EVALUATOR": "<path d=\"m21.64 3.64-1.28-1.28a1.21 1.21 0 0 0-1.72 0L2.36 18.64a1.21 1.21 0 0 0 0 1.72l1.28 1.28a1.2 1.2 0 0 0 1.72 0L21.64 5.36a1.2 1.2 0 0 0 0-1.72\"/><path d=\"m14 7 3 3\"/><path d=\"M5 6v4\"/><path d=\"M19 14v4\"/><path d=\"M10 2v2\"/><path d=\"M7 8H3\"/><path d=\"M21 16h-4\"/><path d=\"M11 3H9\"/>"};
+const typeIcon = (t) => `<svg class="ti" viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${TYPE_ICONS[t] || TYPE_ICONS.SPAN}</svg>`;
 const state = { tab: "traces", trace: null, obs: null, runs: new Set() };
 try { Object.assign(state, JSON.parse(localStorage.getItem("lite-view") || "{}"), { runs: new Set(JSON.parse(localStorage.getItem("lite-runs") || "[]")) }); } catch {}
 const save = () => { try { localStorage.setItem("lite-view", JSON.stringify({ tab: state.tab, trace: state.trace })); localStorage.setItem("lite-runs", JSON.stringify([...state.runs])); } catch {} };
@@ -191,7 +195,7 @@ async function renderTrace(id) {
     const s = +new Date(o.startTime), e = +new Date(o.endTime || o.startTime);
     const left = ((s - start) / span) * 100, width = Math.max(((e - s) / span) * 100, 0.3);
     return `<div class="node ${o.level === "ERROR" ? "error" : ""} ${o.id === state.obs ? "sel" : ""}" data-id="${esc(o.id)}">
-      <div class="label" style="padding-left:${d * 16}px"><span class="type" data-type="${esc(o.type)}">${esc(o.type)}</span>${esc(o.name)}${o.model ? ` <span class="mono" style="color:var(--muted)">${esc(o.model)}</span>` : ""}</div>
+      <div class="label" style="padding-left:${d * 16}px"><span class="type" data-type="${esc(o.type)}" title="${esc(o.type)}">${typeIcon(o.type)}${esc(o.type)}</span>${esc(o.name)}${o.model ? ` <span class="mono" style="color:var(--muted)">${esc(o.model)}</span>` : ""}</div>
       <div class="lane"><div class="bar ${o.level === "ERROR" ? "err" : ""}" data-type="${esc(o.type)}" style="left:${left}%;width:${width}%"></div>
       <span class="dur" style="${left + width > 70 ? `right:calc(${100 - left}% + 6px)` : `left:calc(${left + width}% + 6px)`}">${dur(secs(o.startTime, o.endTime))}${o.totalCost ? " · " + money(o.totalCost) : ""}</span></div></div>`;
   }).join("");

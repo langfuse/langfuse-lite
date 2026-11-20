@@ -31,6 +31,7 @@ chmodSync("dist/cli.js", 0o755);
 // The bundle and the executables contain these; their licenses ship alongside.
 const notices: [string, string][] = [
   ["Langfuse (vendor/langfuse: OTel conversion, cost calculation, model prices)", "vendor/LICENSE-langfuse"],
+  ["Lucide icons (observation type icons in the viewer)", "vendor/LICENSE-lucide"],
   ["zod", "node_modules/zod/LICENSE"],
   ["decimal.js", "node_modules/decimal.js/LICENCE.md"],
   ["lossless-json", "node_modules/lossless-json/LICENSE.md"],
