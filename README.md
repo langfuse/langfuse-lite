@@ -19,6 +19,10 @@ Langfuse image; the schema always comes from that image's own migrations.
 and MCP work for everything the agent-testing usage suite does. It is not a
 supported Langfuse distribution.
 
+**Next (planned, not started):** a slim server for experiment runs and local
+agent tracing: one TypeScript process and one SQLite file, about 1 MB, under
+1 s to start, `npx -y langfuse-lite`. See [docs/slim-server.md](docs/slim-server.md).
+
 ## Run: one container
 
 ```bash
