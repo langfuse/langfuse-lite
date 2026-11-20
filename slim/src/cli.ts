@@ -28,7 +28,10 @@ Commands:
   trace <id>                Show a trace as a tree: timings, errors, tokens, cost
   runs                      List experiment runs with their average scores
   compare <run> [<run>...]  Compare runs item by item (run id or name)
-  sql "<query>"             Run a read-only SQL query on the database
+  sql "<query>"             Run a read-only SQL query on the database. Tables and views:
+                              observations (one row per observation, Langfuse's names), traces,
+                              scores, datasets, dataset_items, events (observations as stored),
+                              otlp_requests (raw OTLP). Columns: sql "PRAGMA table_info(observations)"
   export [--out <file>]     Write the viewer with its data as one HTML file (default langfuse-lite.html)
   push --to <url>           Copy everything to a Langfuse (Cloud or self-hosted)
 
@@ -195,7 +198,22 @@ function cmdCompare(db: Db, refs: string[], o: { json: boolean }) {
 function cmdSql(db: Db, query: string | undefined, o: { json: boolean }) {
   if (!query) throw new Error('usage: langfuse-lite sql "SELECT ..."');
   if (!/^\s*(select|with|pragma|explain)\b/i.test(query)) throw new Error("sql runs read-only queries (SELECT/WITH/PRAGMA/EXPLAIN)");
-  const rows = db.all<Record<string, unknown>>(query);
+  let rows: Record<string, unknown>[];
+  try {
+    rows = db.all<Record<string, unknown>>(query);
+  } catch (e) {
+    const message = e instanceof Error ? e.message : String(e);
+    if (/no such (table|column)/.test(message)) {
+      const tables = db.all<{ name: string; type: string }>(
+        "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' AND name != 'lite_meta' ORDER BY name",
+      );
+      throw new Error(
+        `${message}\n  tables and views: ${tables.map((t) => t.name).join(", ")}` +
+          `\n  columns of one: langfuse-lite sql "PRAGMA table_info(observations)"`,
+      );
+    }
+    throw e;
+  }
   if (o.json || !rows.length) return console.log(JSON.stringify(rows, null, 2));
   console.log(table(rows.map((r) => Object.fromEntries(Object.entries(r).map(([k, v]) => [k, short(v ?? "", 60)]))), Object.keys(rows[0])));
 }

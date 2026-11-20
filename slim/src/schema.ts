@@ -138,11 +138,18 @@ CREATE TABLE IF NOT EXISTS dataset_items (
 );
 CREATE INDEX IF NOT EXISTS dataset_items_dataset ON dataset_items (dataset_id, created_at);
 
+-- Views carry no data: they are dropped and recreated on every start, so their
+-- definitions can change between versions.
+DROP VIEW IF EXISTS traces;
+DROP VIEW IF EXISTS observations;
+
 -- One row per trace, for listing: trace-level fields come from whichever span set them.
-CREATE VIEW IF NOT EXISTS traces AS
+CREATE VIEW traces AS
 SELECT
   trace_id AS id,
   COALESCE(MAX(trace_name), MAX(CASE WHEN parent_span_id IS NULL THEN name END)) AS name,
+  MAX(CASE WHEN parent_span_id IS NULL THEN input END) AS input,
+  MAX(CASE WHEN parent_span_id IS NULL THEN output END) AS output,
   MAX(user_id) AS user_id,
   MAX(session_id) AS session_id,
   MAX(environment) AS environment,
@@ -155,6 +162,16 @@ SELECT
   MAX(experiment_id) AS experiment_id
 FROM events
 GROUP BY trace_id;
+
+-- events with Langfuse's names, for queries written the way Langfuse names things.
+CREATE VIEW observations AS
+SELECT
+  id, trace_id, parent_span_id AS parent_observation_id, type, name, level, status_message,
+  start_time, end_time, completion_start_time, provided_model_name AS model, model_id AS internal_model_id,
+  model_parameters, usage_details, cost_details, total_cost, input, output, metadata, environment, version,
+  release, tags, user_id, session_id, trace_name, prompt_name, prompt_version,
+  experiment_id, experiment_name, experiment_item_id, experiment_dataset_id
+FROM events;
 `;
 
 export function migrate(db: Db) {

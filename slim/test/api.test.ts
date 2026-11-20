@@ -198,6 +198,13 @@ describe("misc", () => {
     expect((await call("GET", "/api/lite/datasets/nope")).status).toBe(404);
   });
 
+  test("sql views use Langfuse's names: observations, and traces with the root's input", () => {
+    const obs = db.all<Record<string, unknown>>("SELECT * FROM observations WHERE trace_id = '11111111111111111111111111111111' AND type = 'GENERATION'");
+    expect(obs[0]).toMatchObject({ name: "chat gpt-4o", model: "gpt-4o", level: "ERROR", parent_observation_id: "aaaaaaaaaaaaaaaa" });
+    const trace = db.get<Record<string, unknown>>("SELECT * FROM traces WHERE id = '11111111111111111111111111111111'");
+    expect(trace).toHaveProperty("input");
+  });
+
   test("export embeds the viewer's data in one HTML file", () => {
     const { html, traces, runs } = exportViewer(db, 100);
     expect(traces).toBeGreaterThan(0);
