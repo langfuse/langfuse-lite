@@ -681,6 +681,12 @@ route("GET", "/api/lite/traces/:id", ({ db, params }) => {
   return ok(detail);
 });
 route("GET", "/api/lite/experiments", ({ db }) => ok({ data: experimentSummaries(db) }));
+route("GET", "/api/lite/datasets", ({ db }) => ok({ data: datasetSummaries(db) }));
+route("GET", "/api/lite/datasets/:id", ({ db, params }) => {
+  const detail = datasetDetail(db, decodeURIComponent(params[0]));
+  if (!detail) throw notFound("Dataset");
+  return ok(detail);
+});
 route("GET", "/api/lite/compare", ({ db, url }) => {
   const runs = url.searchParams.getAll("run");
   if (runs.length < 1) throw invalid("pass one or more run=<experiment id or name>");
@@ -749,6 +755,57 @@ export function traceDetail(db: Db, id: string) {
   };
 }
 
+/** Datasets with item counts and the experiment runs made on them. */
+export function datasetSummaries(db: Db) {
+  const runs = experimentSummaries(db);
+  return db
+    .all<Record<string, any>>(
+      `SELECT d.*, COUNT(i.id) AS items, SUM(CASE WHEN i.status = 'ARCHIVED' THEN 1 ELSE 0 END) AS archived
+       FROM datasets d LEFT JOIN dataset_items i ON i.dataset_id = d.id GROUP BY d.id ORDER BY d.created_at DESC`,
+    )
+    .map((d) => {
+      const own = runs.filter((r) => r.dataset_id === d.id);
+      return {
+        id: d.id,
+        name: d.name,
+        description: d.description ?? null,
+        createdAt: iso(d.created_at),
+        items: d.items,
+        archived: d.archived ?? 0,
+        runs: own.length,
+        lastRunAt: own.length ? own[0].start_time : null,
+      };
+    });
+}
+
+/** One dataset: its fields, items (oldest first, as created) and runs (newest first). */
+export function datasetDetail(db: Db, id: string) {
+  const d = db.get<DatasetRow>("SELECT * FROM datasets WHERE id = ?", id);
+  if (!d) return null;
+  const items = db.all(`${ITEM_SELECT} WHERE i.dataset_id = ? ORDER BY i.created_at, i.id`, id).map(formatItem);
+  const traces = new Set(
+    db.all<{ id: string }>(
+      `SELECT DISTINCT trace_id AS id FROM events WHERE trace_id IN (SELECT source_trace_id FROM dataset_items WHERE dataset_id = ?)`,
+      id,
+    ).map((r) => r.id),
+  );
+  const runItems = db.all<{ item: string; n: number }>(
+    `SELECT experiment_item_id AS item, COUNT(DISTINCT experiment_id) AS n FROM ${itemRoots()} AND e.experiment_dataset_id = ? GROUP BY 1`,
+    id,
+  );
+  const runsPerItem = new Map(runItems.map((r) => [r.item, r.n]));
+  return {
+    ...formatDataset(d),
+    items: items.map((i) => ({
+      ...i,
+      runCount: runsPerItem.get(i.id) ?? 0,
+      // Only link a source trace that is in this database.
+      sourceTraceAvailable: Boolean(i.sourceTraceId && traces.has(i.sourceTraceId)),
+    })),
+    runs: experimentSummaries(db).filter((r) => r.dataset_id === id),
+  };
+}
+
 /** The viewer with its data embedded: one HTML file that works without a server. */
 export function exportViewer(db: Db, limit: number): { html: string; traces: number; runs: number } {
   const traces = listTraces(db, limit);
@@ -762,11 +819,16 @@ export function exportViewer(db: Db, limit: number): { html: string; traces: num
     : [];
   const details: Record<string, unknown> = {};
   for (const id of new Set([...traces.map((t) => t.id), ...runTraceIds])) details[id] = traceDetail(db, id);
+  const datasets = datasetSummaries(db);
+  const datasetDetails: Record<string, unknown> = {};
+  for (const d of datasets) datasetDetails[d.id] = datasetDetail(db, d.id);
   const data = {
     exportedAt: new Date().toISOString(),
     traces,
     details,
     experiments,
+    datasets,
+    datasetDetails,
     compare: experiments.length ? compareRuns(db, experiments.map((e) => e.id)) : { runs: [], items: [] },
   };
   const json = JSON.stringify(data).replace(/</g, "\\u003c");

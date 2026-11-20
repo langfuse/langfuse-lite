@@ -5,6 +5,7 @@
 Uses the Langfuse Python SDK only (no LLM calls; outputs are scripted):
   - three support-agent traces with planning, retrieval, tool calls and one
     failing tool, with user, session, usage and cost
+  - a dataset "support-tickets" made from those traces (items link back to them)
   - a dataset "refund-policy-qa" with 8 questions
   - two experiment runs on it, prompt v1 and prompt v2, each with an
     exact-match and a grounded evaluator plus a run-level accuracy score
@@ -37,6 +38,7 @@ tickets = [
     ("user-208", "I was charged twice for my subscription.", "duplicate charge refunded", None),
     ("user-114", "Can you email me the receipt?", None, "SMTP timeout after 3 retries"),
 ]
+ticket_traces = []
 for i, (user, question, status, failure) in enumerate(tickets):
     with propagate_attributes(user_id=user, session_id=f"support-{user}", tags=["support-agent", "demo"],
                               trace_name="support-agent", metadata={"channel": "chat", "agent_version": "1.4.0"}):
@@ -67,9 +69,18 @@ for i, (user, question, status, failure) in enumerate(tickets):
                 ans.update(output={"role": "assistant", "content": text}, usage_details={"input": 2410 + 70 * i, "output": 96})
             agent.update(output={"reply": text})
             trace_id = agent.trace_id
+            ticket_traces.append((trace_id, question, text))
     lf.create_score(name="resolved", value="no" if failure else "yes", data_type="CATEGORICAL", trace_id=trace_id)
     lf.create_score(name="helpfulness", value=0.4 if failure else 0.9, trace_id=trace_id,
                     comment="tool failed, offered a workaround" if failure else None)
+
+# A dataset grown from production traces: each item points at its source trace.
+lf.create_dataset(name="support-tickets", description="Real tickets from the support agent, kept as regression cases",
+                  metadata={"owner": "support-team"})
+for trace_id, question, reply in ticket_traces:
+    lf.create_dataset_item(dataset_name="support-tickets", input={"message": question},
+                           expected_output={"reply": reply}, source_trace_id=trace_id,
+                           metadata={"from": "production"})
 
 # --- dataset and two experiment runs ----------------------------------------------
 questions = [

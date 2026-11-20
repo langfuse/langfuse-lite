@@ -179,6 +179,25 @@ describe("misc", () => {
     expect(prompts.status).toBe(501);
   });
 
+  test("datasets tab: items with run counts and the runs made on the dataset", async () => {
+    const dsId = db.get<{ id: string }>("SELECT id FROM datasets WHERE name = 'ds'")!.id;
+    const attr = (key: string, v: string) => ({ key, value: { stringValue: v } });
+    await call("POST", "/api/public/otel/v1/traces", {
+      resourceSpans: [{ scopeSpans: [{ scope: { name: "langfuse-sdk" }, spans: [{
+        traceId: "33333333333333333333333333333333", spanId: "3333333333333333", name: "experiment-item-run",
+        startTimeUnixNano: String(T0), endTimeUnixNano: String(T0 + 3_000_000n),
+        attributes: [attr("langfuse.experiment.id", "exp-ds-1"), attr("langfuse.experiment.name", "ds-run"),
+          attr("langfuse.experiment.dataset.id", dsId), attr("langfuse.experiment.item.id", "item-1")],
+      }] }] }],
+    });
+    const list = await call("GET", "/api/lite/datasets");
+    expect(list.body.data.find((d: any) => d.name === "ds")).toMatchObject({ items: 1, runs: 1 });
+    const detail = await call("GET", `/api/lite/datasets/${dsId}`);
+    expect(detail.body.items[0]).toMatchObject({ id: "item-1", runCount: 1, sourceTraceAvailable: false });
+    expect(detail.body.runs.map((r: any) => r.id)).toEqual(["exp-ds-1"]);
+    expect((await call("GET", "/api/lite/datasets/nope")).status).toBe(404);
+  });
+
   test("export embeds the viewer's data in one HTML file", () => {
     const { html, traces, runs } = exportViewer(db, 100);
     expect(traces).toBeGreaterThan(0);
@@ -187,6 +206,8 @@ describe("misc", () => {
     const data = JSON.parse(json);
     expect(Object.keys(data.details)).toContain("11111111111111111111111111111111");
     expect(data.compare.runs.map((r: any) => r.id)).toContain("exp-json-1");
+    expect(data.datasets.map((d: any) => d.name)).toContain("ds");
+    expect(Object.values(data.datasetDetails).some((d: any) => d.items.length === 1)).toBe(true);
     expect(json).not.toContain("</");
   });
 

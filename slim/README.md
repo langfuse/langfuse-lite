@@ -13,7 +13,10 @@ export LANGFUSE_BASE_URL=http://localhost:3000 LANGFUSE_PUBLIC_KEY=pk-lf-local L
 
 Then trace and run experiments with the Langfuse SDKs as usual, or send any
 OpenTelemetry traces to `http://localhost:3000/api/public/otel/v1/traces`.
-Data goes to `./.langfuse/lite.db`. Open http://localhost:3000 for the viewer.
+Data goes to `./.langfuse/lite.db`. Open http://localhost:3000 for the viewer:
+traces (waterfall, input/output, usage and cost per step), datasets (items, their
+source traces and the runs made on each; read-only, datasets are managed in code)
+and experiments (runs compared item by item).
 
 Not published to npm or PyPI yet; build locally (see Development).
 `python test/demo.py http://127.0.0.1:3000` writes demo data (agent traces and
