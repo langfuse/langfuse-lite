@@ -94,6 +94,7 @@ class Reader {
     else if (wireType === 2) this.pos += this.uint32();
     else if (wireType === 5) this.pos += 4;
     else throw new Error(`unsupported wire type ${wireType}`);
+    if (this.pos > this.end) throw new Error("truncated field");
   }
   /** Iterates fields: calls fn(fieldNumber, wireType); fn must consume the value or return false to skip it. */
   fields(fn: (field: number, wireType: number) => boolean | void) {
@@ -254,6 +255,7 @@ export function decodeTraceRequestProto(buf: Uint8Array): ResourceSpans[] {
 export function decodeTraceRequestJson(text: string): ResourceSpans[] {
   const body = JSON.parse(text);
   const resourceSpans: ResourceSpans[] = body?.resourceSpans ?? body?.resource_spans ?? [];
+  if (!Array.isArray(resourceSpans)) throw new Error("resourceSpans must be an array");
   for (const rs of resourceSpans)
     for (const ss of rs.scopeSpans ?? [])
       for (const s of ss.spans ?? []) {

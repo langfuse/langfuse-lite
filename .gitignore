@@ -1,6 +1,7 @@
 node_modules/
 dist/
-.venv-test/
+.venv*/
+langfuse-lite.html
 *.tgz
 .langfuse/
 __pycache__/

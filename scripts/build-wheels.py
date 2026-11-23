@@ -27,6 +27,9 @@ PLATFORMS = {
     "darwin-arm64": "macosx_13_0_arm64",
     "windows-x64": "win_amd64",
 }
+_init = (ROOT / "python" / "langfuse_lite" / "__init__.py").read_text()
+if f'__version__ = "{VERSION}"' not in _init:
+    raise SystemExit(f"python/langfuse_lite/__init__.py: __version__ does not match package.json ({VERSION})")
 README = (ROOT / "README.md").read_text() if (ROOT / "README.md").exists() else ""
 METADATA = f"""Metadata-Version: 2.1
 Name: langfuse-lite

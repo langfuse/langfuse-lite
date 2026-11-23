@@ -44,6 +44,8 @@
     "experiments",
     "agents"
   ],
+  "homepage": "https://github.com/langfuse/langfuse-lite#readme",
+  "bugs": "https://github.com/langfuse/langfuse-lite/issues",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/langfuse/langfuse-lite.git"

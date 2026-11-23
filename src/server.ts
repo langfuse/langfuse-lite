@@ -1,7 +1,7 @@
 // Starts the API on Bun.serve when running under Bun, otherwise on node:http
 // with a small Request/Response bridge.
 
-import { handle } from "./api";
+import { handle, type HandleOptions } from "./api";
 import type { Db } from "./db";
 import { MAX_BODY_BYTES, SCALE_HINT } from "./limits";
 
@@ -11,16 +11,20 @@ export type Server = { url: string; port: number; stop(): Promise<void> };
 // own limits sit above that so the hint is what clients see.
 const MAX_BODY = MAX_BODY_BYTES * 2;
 
+export const isLoopback = (host: string) => host === "localhost" || host === "::1" || host === "[::1]" || /^127\./.test(host);
+
 export async function serve(db: Db, opts: { host: string; port: number }): Promise<Server> {
   const Bun = (globalThis as { Bun?: any }).Bun;
+  const handleOpts: HandleOptions = { localOnly: isLoopback(opts.host) };
+  const urlHost = opts.host.includes(":") && !opts.host.startsWith("[") ? `[${opts.host}]` : opts.host;
   if (Bun) {
     const s = Bun.serve({
       hostname: opts.host,
       port: opts.port,
       maxRequestBodySize: MAX_BODY,
-      fetch: (req: Request) => handle(db, req),
+      fetch: (req: Request) => handle(db, req, handleOpts),
     });
-    return { url: `http://${opts.host}:${s.port}`, port: s.port, stop: async () => s.stop(true) };
+    return { url: `http://${urlHost}:${s.port}`, port: s.port, stop: async () => s.stop(true) };
   }
   const http = await import("node:http");
   const server = http.createServer(async (req, res) => {
@@ -45,7 +49,7 @@ export async function serve(db: Db, opts: { host: string; port: number }): Promi
         headers,
         body: method === "GET" || method === "HEAD" ? undefined : Buffer.concat(chunks),
       });
-      const response = await handle(db, request);
+      const response = await handle(db, request, handleOpts);
       const out: Record<string, string> = {};
       response.headers.forEach((v, k) => (out[k] = v));
       res.writeHead(response.status, out);
@@ -61,8 +65,13 @@ export async function serve(db: Db, opts: { host: string; port: number }): Promi
   });
   const port = (server.address() as { port: number }).port;
   return {
-    url: `http://${opts.host}:${port}`,
+    url: `http://${urlHost}:${port}`,
     port,
-    stop: () => new Promise((resolve) => server.close(() => resolve())),
+    // Idle keep-alive connections (an open viewer tab) would otherwise hold the process for seconds.
+    stop: () =>
+      new Promise((resolve) => {
+        server.close(() => resolve());
+        server.closeAllConnections();
+      }),
   };
 }

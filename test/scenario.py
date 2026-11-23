@@ -10,7 +10,7 @@ Writes, through the SDK only:
   - an experiment on local data (no dataset)
   - a score on the agent trace
 
-Prints a JSON manifest (ids and names) on stdout for test/snapshot.py.
+Prints a JSON manifest (ids and names) on stdout for test/conformance.py.
 <tag> keeps names unique per run.
 """
 from __future__ import annotations

@@ -11,10 +11,12 @@ const now = () => new Date().toISOString();
 const json = (v: unknown) => JSON.stringify(v ?? null);
 const stringify = (v: unknown) => (v == null ? null : typeof v === "string" ? v : JSON.stringify(v));
 
-export function decompress(body: Uint8Array, encoding: string | null): Uint8Array {
+/** Throws ERR_BUFFER_TOO_LARGE when the decompressed body would exceed maxBytes. */
+export function decompress(body: Uint8Array, encoding: string | null, maxBytes?: number): Uint8Array {
   if (!encoding || encoding === "identity") return body;
-  if (encoding === "gzip") return gunzipSync(body);
-  if (encoding === "deflate") return inflateSync(body);
+  const limit = maxBytes ? { maxOutputLength: maxBytes } : {};
+  if (encoding === "gzip") return gunzipSync(body, limit);
+  if (encoding === "deflate") return inflateSync(body, limit);
   throw new Error(`unsupported content-encoding ${encoding}`);
 }
 
@@ -27,8 +29,13 @@ export function decodeTraceRequest(body: Uint8Array, contentType: string): Resou
 export type SdkHeaders = { publicKey?: string; sdkName?: string; sdkVersion?: string };
 
 /** Stores one OTLP request and its spans; returns the number of observations written. */
-export function ingestTraceRequest(db: Db, body: Uint8Array, contentType: string, headers: SdkHeaders): number {
-  const resourceSpans = decodeTraceRequest(body, contentType);
+export function ingestTraceRequest(
+  db: Db,
+  body: Uint8Array,
+  contentType: string,
+  headers: SdkHeaders,
+  resourceSpans: ResourceSpans[] = decodeTraceRequest(body, contentType),
+): number {
   const observations = processSpans(resourceSpans, headers);
   return db.tx(() => {
     db.run(
