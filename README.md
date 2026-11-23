@@ -4,8 +4,14 @@ A local Langfuse for **experiment runs** and **agent tracing and debugging**,
 made for code agents: one process, one SQLite file, the official Langfuse SDKs
 unchanged. No Docker, no databases to run.
 
+> **Status: prototype.** Not published to npm or PyPI yet, so `npx langfuse-lite` and
+> `uvx langfuse-lite` do not work yet. Until then, build it from this repository
+> (needs Node 22.13+ and [Bun](https://bun.sh) for the build):
+
 ```bash
-npx -y langfuse-lite serve        # or: uvx langfuse-lite serve, or the standalone executable
+git clone https://github.com/langfuse/langfuse-lite && cd langfuse-lite
+npm install && npm run build
+node dist/cli.js serve            # once published: npx -y langfuse-lite serve, or uvx langfuse-lite serve
 ```
 
 ```bash
@@ -32,14 +38,13 @@ agent, tool, retriever, …). Observations that belong together share a trace id
 and trace-level attributes such as the trace name, user, session and tags are
 fields on the observations. There are no separate trace records.
 
-**Status:** prototype, not published to npm or PyPI yet; build it locally (see
-Development). MIT license.
-`python test/demo.py http://127.0.0.1:3000` writes demo data (support-agent runs and
+MIT license. `python test/demo.py http://127.0.0.1:3000` writes demo data (support-agent runs and
 two comparable experiment runs) through the Python SDK.
 
 ## For agents: the commands
 
 The commands read the database directly, so they work while the server runs or after.
+Below, `langfuse-lite` stands for `node dist/cli.js` until the package is published.
 
 ```text
 $ langfuse-lite observations                      # root observations, newest first, totals per trace id
@@ -184,7 +189,7 @@ trace, observation, session and run scores; datasets and items; error responses.
 ```bash
 npm install                     # dev dependencies (bundled into dist)
 bun run scripts/build.ts        # dist/cli.js
-bun test test/                  # API tests
+bun test test/                  # API and CLI tests
 npx tsc -p .                    # type check
 bun run scripts/build.ts --compile && python3 scripts/build-wheels.py   # executables + wheels
 ```
@@ -241,6 +246,25 @@ Langfuse (with `push` to move the data), when:
 It logs a warning with the same pointer when a request takes more than 2 s, and at
 start when the database holds more than 1 million observations or 2 GB.
 
+## Security
+
+langfuse-lite is a local development tool **without authentication**: any API key
+is accepted, and whoever can reach the port can read and write everything in
+the database, prompts and outputs included.
+
+- `serve` listens on `127.0.0.1` only. `--host 0.0.0.0` (for example to reach it
+  from a container) opens it to the network; do that on a trusted network only,
+  and never on the public internet.
+- Web pages cannot use the server from the browser: requests with a foreign
+  `Origin` are refused, and on loopback so are requests whose `Host` is neither
+  `localhost` nor an IP address (DNS rebinding). To reach it under another host
+  name, for example through a reverse proxy, set
+  `LANGFUSE_LITE_ALLOWED_HOSTS=name1,name2`.
+- `sql` opens the database read-only for the query.
+- `push` sends the stored spans, datasets and scores to the URL you give it.
+  Pass keys through `LANGFUSE_PUBLIC_KEY` / `LANGFUSE_SECRET_KEY` rather than
+  flags, which end up in the shell history.
+
 ## Limits
 
 - Experiment runs, observations and scores only. Prompts are not served
@@ -249,6 +273,7 @@ start when the database holds more than 1 million observations or 2 GB.
   trace id the way Langfuse's worker does; the SDKs already set them on every span.
 - Cost uses Langfuse's default model prices only; custom models need `push`.
 - One local user: any API key is accepted and requests run one at a time.
+- `GET /api/public/v3/scores` accepts the `value` and `operator` parameters but does not filter by them yet.
 - Not published yet: the npm and PyPI names (`langfuse-lite`) were free when checked.
 
 ## License
