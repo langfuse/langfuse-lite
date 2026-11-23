@@ -123,6 +123,7 @@ CREATE TABLE IF NOT EXISTS scores (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS scores_trace ON scores (trace_id);
+CREATE INDEX IF NOT EXISTS scores_observation ON scores (observation_id) WHERE observation_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS scores_run ON scores (dataset_run_id) WHERE dataset_run_id IS NOT NULL;
 
 CREATE TABLE IF NOT EXISTS datasets (
@@ -177,5 +178,8 @@ function migrateFromV1(db: Db) {
 export function migrate(db: Db) {
   migrateFromV1(db);
   db.exec(DDL);
-  db.run("INSERT OR REPLACE INTO lite_meta (key, value) VALUES ('schema_version', ?)", String(SCHEMA_VERSION));
+  // Only write when it changes: read commands should not need the write lock a busy server holds.
+  const stored = db.get<{ value: string }>("SELECT value FROM lite_meta WHERE key = 'schema_version'")?.value;
+  if (stored !== String(SCHEMA_VERSION))
+    db.run("INSERT OR REPLACE INTO lite_meta (key, value) VALUES ('schema_version', ?)", String(SCHEMA_VERSION));
 }

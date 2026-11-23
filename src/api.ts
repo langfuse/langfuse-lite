@@ -3,7 +3,7 @@
 // response shapes follow Langfuse 4.x; see docs/slim-server.md for the list.
 
 import type { Db, Param } from "./db";
-import { decompress, ingestTraceRequest } from "./ingest";
+import { decodeTraceRequest, decompress, ingestTraceRequest } from "./ingest";
 import { findModelById, LANGFUSE_VERSION } from "./langfuse";
 import { isBusy, MAX_BODY_BYTES, noteRequestTime, SCALE_HINT } from "./limits";
 import { VIEWER_HTML } from "./viewer";
@@ -47,6 +47,13 @@ const metadataValues = (raw: unknown) => {
   return out;
 };
 const iso = (s: unknown) => (s == null ? null : new Date(String(s)).toISOString());
+/** A timestamp from a request body: ISO string or epoch milliseconds; null when absent. */
+function timestampOf(v: unknown, name: string): string | null {
+  if (v == null) return null;
+  const d = new Date(typeof v === "number" ? v : String(v));
+  if (Number.isNaN(d.getTime())) throw invalid(`${name} must be an ISO 8601 datetime`);
+  return d.toISOString();
+}
 const isIsoDateTime = (s: string) => /^\d{4}-\d\d-\d\dT\d\d:\d\d(:\d\d(\.\d+)?)?(Z|[+-]\d\d:\d\d)$/.test(s);
 const newCuid = () => "c" + crypto.randomUUID().replace(/-/g, "").slice(0, 24);
 const nowIso = () => new Date().toISOString();
@@ -364,6 +371,7 @@ function createScore(db: Db, b: Record<string, any>) {
   } else throw invalid(`unknown dataType ${dataType}`);
   const id = typeof b.id === "string" && b.id ? b.id : crypto.randomUUID();
   const t = nowIso();
+  const timestamp = timestampOf(b.timestamp, "timestamp") ?? t;
   db.run(
     `INSERT INTO scores (id, name, value, string_value, data_type, source, trace_id, observation_id, session_id,
        dataset_run_id, comment, metadata, config_id, queue_id, environment, timestamp, created_at, updated_at)
@@ -375,7 +383,7 @@ function createScore(db: Db, b: Record<string, any>) {
        environment = excluded.environment, timestamp = excluded.timestamp, updated_at = excluded.updated_at`,
     id, b.name, value, stringValue, dataType, "API", b.traceId ?? null, b.observationId ?? null,
     b.sessionId ?? null, b.datasetRunId ?? null, b.comment ?? null, JSON.stringify(b.metadata ?? {}),
-    b.configId ?? null, b.queueId ?? null, b.environment ?? "default", iso(b.timestamp) ?? t, t, t,
+    b.configId ?? null, b.queueId ?? null, b.environment ?? "default", timestamp, t, t,
   );
   return { id };
 }
@@ -606,12 +614,28 @@ route("GET", "/api/public/projects", () =>
 
 route("POST", "/api/public/otel/v1/traces", async ({ db, req }) => {
   const contentType = req.headers.get("content-type") ?? "application/x-protobuf";
-  const body = decompress(new Uint8Array(await req.arrayBuffer()), req.headers.get("content-encoding"));
+  const encoding = req.headers.get("content-encoding")?.trim().toLowerCase() || null;
+  if (encoding && !["identity", "gzip", "deflate"].includes(encoding))
+    throw new HttpError(415, `Unsupported content-encoding "${encoding}"; send gzip, deflate or no compression.`, "UnsupportedMediaType");
+  let body: Uint8Array;
+  try {
+    body = decompress(new Uint8Array(await req.arrayBuffer()), encoding, MAX_BODY_BYTES);
+  } catch (e) {
+    if ((e as { code?: string }).code === "ERR_BUFFER_TOO_LARGE")
+      throw new HttpError(413, `Request body exceeds langfuse-lite's ${MAX_BODY_BYTES / 1048576} MB limit once decompressed. ${SCALE_HINT}`, "PayloadTooLarge");
+    throw invalid(`request body is not valid ${encoding} data`);
+  }
+  let resourceSpans;
+  try {
+    resourceSpans = decodeTraceRequest(body, contentType);
+  } catch (e) {
+    throw invalid(`request body is not a valid OTLP trace export (${contentType.includes("json") ? "JSON" : "protobuf"}): ${e instanceof Error ? e.message : e}`);
+  }
   ingestTraceRequest(db, body, contentType, {
     publicKey: publicKeyOf(req),
     sdkName: req.headers.get("x-langfuse-sdk-name") ?? undefined,
     sdkVersion: req.headers.get("x-langfuse-sdk-version") ?? undefined,
-  });
+  }, resourceSpans);
   // An empty ExportTraceServiceResponse, in the request's encoding.
   return contentType.includes("json")
     ? ok({})
@@ -704,11 +728,52 @@ function publicKeyOf(req: Request): string | undefined {
   }
 }
 
-export async function handle(db: Db, req: Request): Promise<Response> {
+export type HandleOptions = {
+  /** The server listens on loopback only: refuse requests addressed to any other host name. */
+  localOnly?: boolean;
+};
+
+/** Host names accepted besides localhost and IP addresses, from $LANGFUSE_LITE_ALLOWED_HOSTS (comma-separated). */
+const allowedHosts = () =>
+  (process.env.LANGFUSE_LITE_ALLOWED_HOSTS ?? "").split(",").map((h) => h.trim().toLowerCase()).filter(Boolean);
+const isLocalName = (hostname: string) =>
+  hostname === "localhost" || hostname.endsWith(".localhost") || /^(\d{1,3}\.){3}\d{1,3}$/.test(hostname) || hostname.startsWith("[");
+
+/** There is no authentication, so the server must not answer web pages from other
+ * sites: they could otherwise read traces or write data in the user's browser.
+ *  - A request carrying an Origin other than the server's own is refused (cross-site fetch or form).
+ *  - On loopback, a Host that is neither localhost nor an IP address is refused (DNS rebinding). */
+function refuseForeignSite(req: Request, url: URL, opts: HandleOptions): Response | null {
+  const allowed = allowedHosts();
+  const refuse = (what: string) =>
+    ok({
+      message: `langfuse-lite refused a request ${what}. It has no authentication and only answers requests addressed to it directly; ` +
+        `set LANGFUSE_LITE_ALLOWED_HOSTS=<host> to allow another host name.`,
+      error: "Forbidden",
+    }, 403);
+  const origin = req.headers.get("origin");
+  if (origin) {
+    let originHost: URL | null = null;
+    try {
+      originHost = new URL(origin);
+    } catch {
+      // "null" and other opaque origins
+    }
+    if (!originHost || (originHost.host !== url.host && !allowed.includes(originHost.hostname)))
+      return refuse(`from the web origin ${origin}`);
+  }
+  const hostname = url.hostname.toLowerCase();
+  if (opts.localOnly && !isLocalName(hostname) && !allowed.includes(hostname)) return refuse(`for the host ${url.host}`);
+  return null;
+}
+
+export async function handle(db: Db, req: Request, opts: HandleOptions = {}): Promise<Response> {
   const started = performance.now();
   const length = Number(req.headers.get("content-length") ?? 0);
-  const res =
-    length > MAX_BODY_BYTES
+  const refused = refuseForeignSite(req, new URL(req.url), opts);
+  const res = refused
+    ? refused
+    : length > MAX_BODY_BYTES
       ? ok({ message: `Request body of ${(length / 1048576).toFixed(0)} MB exceeds langfuse-lite's ${MAX_BODY_BYTES / 1048576} MB limit. ${SCALE_HINT}`, error: "PayloadTooLarge" }, 413)
       : await route_(db, req);
   noteRequestTime(req.method, new URL(req.url).pathname, performance.now() - started);
@@ -903,8 +968,10 @@ export function exportViewer(db: Db, limit: number): { html: string; groups: num
     datasetDetails,
     compare: experiments.length ? compareRuns(db, experiments.map((e) => e.id)) : { runs: [], items: [] },
   };
-  const json = JSON.stringify(data).replace(/</g, "\\u003c");
-  const html = VIEWER_HTML.replace("<script>", `<script>window.__LITE_DATA__ = ${json};</script>\n<script>`);
+  // U+2028/2029 are line terminators in older JS engines; `<` must not close the script element.
+  const json = JSON.stringify(data).replace(/[<\u2028\u2029]/g, (c) => "\\u" + c.charCodeAt(0).toString(16).padStart(4, "0"));
+  // A function, not a string: `$&`, `$'` and `$$` in the data are replacement patterns otherwise.
+  const html = VIEWER_HTML.replace("<script>", () => `<script>window.__LITE_DATA__ = ${json};</script>\n<script>`);
   return { html, groups: Object.keys(trees).length, runs: experiments.length };
 }
 

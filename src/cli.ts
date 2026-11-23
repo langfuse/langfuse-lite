@@ -11,9 +11,10 @@ import { LANGFUSE_VERSION } from "./langfuse";
 import { push } from "./push";
 import { LARGE_DB_BYTES, LARGE_DB_OBSERVATIONS, SCALE_HINT } from "./limits";
 import { migrate } from "./schema";
-import { serve } from "./server";
+import { isLoopback, serve } from "./server";
+import pkg from "../package.json" with { type: "json" };
 
-export const VERSION = "0.1.0";
+export const VERSION: string = pkg.version;
 
 const HELP = `langfuse-lite ${VERSION} (Langfuse ${LANGFUSE_VERSION} data model)
 
@@ -48,7 +49,8 @@ Options:
   --io              observations, tree: also print input and output
   --limit <n>       observations: how many (default 20); export: newest root observations (default 100)
   --port <n>        serve: port (default 3000, or $PORT)
-  --host <h>        serve: host (default 127.0.0.1)
+  --host <h>        serve: host (default 127.0.0.1). There is no authentication: anyone who can
+                      reach the port can read and write the data, so only bind other hosts on a trusted network
   --public-key, --secret-key   push: target keys (or LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY)
 `;
 
@@ -58,15 +60,27 @@ const RENAMED: Record<string, string> = {
   trace: 'there is no "trace" command: like Langfuse v4, everything is an observation. Use "langfuse-lite tree <trace id>" for all observations that share a trace id',
 };
 
+const COMMANDS = ["serve", "observations", "tree", "runs", "compare", "sql", "export", "push"];
+
 function dbPath(arg?: string) {
   return path.resolve(arg ?? process.env.LANGFUSE_LITE_DB ?? path.join(process.cwd(), ".langfuse", "lite.db"));
 }
 
-async function open(file: string): Promise<Db> {
-  fs.mkdirSync(path.dirname(file), { recursive: true });
+/** Only `serve` creates a database; the other commands read one that exists. */
+async function open(file: string, create: boolean): Promise<Db> {
+  if (create) fs.mkdirSync(path.dirname(file), { recursive: true });
+  else if (!fs.existsSync(file))
+    throw new Error(`no database at ${file}. Start one with "langfuse-lite serve", or pass --db <path> (or set LANGFUSE_LITE_DB).`);
   const db = await openDb(file);
   migrate(db);
   return db;
+}
+
+function intOption(name: string, value: string | undefined, def: number, min: number, max: number) {
+  if (value === undefined) return def;
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) throw new Error(`--${name} must be a whole number between ${min} and ${max}, got "${value}"`);
+  return n;
 }
 
 const money = (n: number | null | undefined) => (n ? `$${n < 0.01 ? n.toPrecision(2) : n.toFixed(4)}` : "");
@@ -255,10 +269,14 @@ function cmdSql(db: Db, query: string | undefined, o: { json: boolean }) {
   if (!query) throw new Error('usage: langfuse-lite sql "SELECT ..."');
   if (!/^\s*(select|with|pragma|explain)\b/i.test(query)) throw new Error("sql runs read-only queries (SELECT/WITH/PRAGMA/EXPLAIN)");
   let rows: Record<string, unknown>[];
+  // The check above is a hint for a clear message; this is what enforces it
+  // (WITH … DELETE and writing PRAGMAs pass the check).
+  db.exec("PRAGMA query_only = ON");
   try {
     rows = db.all<Record<string, unknown>>(query);
   } catch (e) {
     const message = e instanceof Error ? e.message : String(e);
+    if (/readonly|read-only/i.test(message)) throw new Error("sql runs read-only queries; this one writes to the database");
     if (/no such (table|column)/.test(message)) {
       const tables = db.all<{ name: string; type: string }>(
         "SELECT name, type FROM sqlite_master WHERE type IN ('table', 'view') AND name NOT LIKE 'sqlite_%' AND name != 'lite_meta' ORDER BY name",
@@ -307,15 +325,22 @@ export async function main(argv = process.argv.slice(2)) {
   const [command, ...rest] = positionals;
   if (o.version) return console.log(VERSION);
   if (o.help || !command || command === "help") return console.log(HELP);
+  if (!COMMANDS.includes(command))
+    throw new Error(RENAMED[command] ?? `unknown command "${command}"; see langfuse-lite --help`);
+  const limit = (def: number) => intOption("limit", o.limit, def, 1, 100_000);
+  if (o.since !== undefined && Number.isNaN(new Date(o.since).getTime()))
+    throw new Error(`--since must be a date or time such as 2026-01-31 or 2026-01-31T12:00:00Z, got "${o.since}"`);
+  const port = intOption("port", o.port ?? process.env.PORT, 3000, 0, 65535);
   const file = dbPath(o.db);
-  const db = await open(file);
+  const db = await open(file, command === "serve");
   try {
     switch (command) {
       case "serve": {
-        const port = Number(o.port ?? process.env.PORT ?? 3000);
         const server = await serve(db, { host: o.host!, port });
         console.log(`langfuse-lite ${VERSION} listening on ${server.url}  (data: ${file})`);
         console.log(`  LANGFUSE_BASE_URL=${server.url} LANGFUSE_PUBLIC_KEY=pk-lf-local LANGFUSE_SECRET_KEY=sk-lf-local`);
+        if (!isLoopback(o.host!))
+          console.error(`warning: listening on ${o.host}, not only on this machine. langfuse-lite has no authentication: anyone who can reach this port can read and write the data.`);
         const n = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM observations")!.n;
         const bytes = fs.statSync(file).size;
         if (n > LARGE_DB_OBSERVATIONS || bytes > LARGE_DB_BYTES)
@@ -330,7 +355,7 @@ export async function main(argv = process.argv.slice(2)) {
       }
       case "observations":
         return cmdObservations(db, {
-          limit: Number(o.limit ?? 20), json: o.json!, io: o.io!, level: o.level, name: o.name, type: o.type,
+          limit: limit(20), json: o.json!, io: o.io!, level: o.level, name: o.name, type: o.type,
           trace: o.trace, experiment: o.experiment, since: o.since,
         });
       case "tree":
@@ -343,7 +368,7 @@ export async function main(argv = process.argv.slice(2)) {
         return cmdSql(db, rest.join(" "), { json: o.json! });
       case "export": {
         const out = path.resolve(o.out ?? "langfuse-lite.html");
-        const { html, groups, runs } = exportViewer(db, Number(o.limit ?? 100));
+        const { html, groups, runs } = exportViewer(db, limit(100));
         fs.writeFileSync(out, html);
         console.log(`Wrote ${out}: ${groups} observation trees, ${runs} experiment runs, ${(html.length / 1024).toFixed(0)} KB. Open it in a browser; no server needed.`);
         return;
@@ -357,8 +382,6 @@ export async function main(argv = process.argv.slice(2)) {
         if (o.json) console.log(JSON.stringify(report, null, 2));
         return;
       }
-      default:
-        throw new Error(RENAMED[command] ?? `unknown command "${command}"; see langfuse-lite --help`);
     }
   } finally {
     db.close();

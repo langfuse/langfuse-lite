@@ -1,7 +1,7 @@
 // bun test: the server end to end on a temporary database, without SDKs.
 // SDK behaviour is covered by test/conformance.py against a real Langfuse.
 import { afterAll, beforeAll, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { gzipSync } from "node:zlib";
@@ -321,5 +321,94 @@ describe("misc", () => {
     } finally {
       target.stop(true);
     }
+  });
+});
+
+describe("bad input and other sites", () => {
+  const post = (body: BodyInit, headers: Record<string, string>) =>
+    fetch(server.url + "/api/public/otel/v1/traces", { method: "POST", headers, body });
+
+  test("requests that cannot be read answer 4xx, not 500", async () => {
+    expect((await post("garbage!!", { "content-type": "application/x-protobuf" })).status).toBe(400);
+    expect((await post("{nope", { "content-type": "application/json" })).status).toBe(400);
+    expect((await post('{"resourceSpans": 1}', { "content-type": "application/json" })).status).toBe(400);
+    expect((await post("x", { "content-type": "application/json", "content-encoding": "br" })).status).toBe(415);
+    expect((await post("not gzip", { "content-type": "application/json", "content-encoding": "gzip" })).status).toBe(400);
+    const badTime = await call("POST", "/api/public/scores", { name: "x", value: 1, traceId: "t", timestamp: "nope" });
+    expect(badTime.status).toBe(400);
+    // Nothing of the above was stored as a raw request.
+    expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM otlp_requests WHERE span_count = 0")!.n).toBe(0);
+  });
+
+  test("a compressed body is limited by its decompressed size", async () => {
+    const bomb = gzipSync(new Uint8Array(65 * 1024 * 1024));
+    expect(bomb.length).toBeLessThan(1024 * 1024);
+    const res = await post(bomb as unknown as BodyInit, { "content-type": "application/json", "content-encoding": "gzip" });
+    expect(res.status).toBe(413);
+  });
+
+  test("web pages from other sites are refused; the viewer and SDKs are not", async () => {
+    const crossSite = await call("POST", "/api/public/v2/datasets", { name: "csrf" }, { origin: "https://evil.example", "content-type": "text/plain" });
+    expect(crossSite.status).toBe(403);
+    expect(db.get("SELECT 1 FROM datasets WHERE name = 'csrf'")).toBeUndefined();
+    expect((await call("GET", "/api/lite/roots", undefined, { origin: "null" })).status).toBe(403);
+    expect((await call("GET", "/api/lite/roots", undefined, { origin: server.url })).status).toBe(200);
+    expect((await call("GET", "/api/lite/roots")).status).toBe(200);
+
+    // DNS rebinding: the browser reaches 127.0.0.1 under the attacker's host name.
+    const at = (host: string) => handle(db, new Request(`http://${host}/api/lite/roots`), { localOnly: true });
+    expect((await at("evil.example:3000")).status).toBe(403);
+    for (const host of ["localhost:3000", "127.0.0.1:3000", "[::1]:3000", "app.localhost:3000"]) expect((await at(host)).status).toBe(200);
+    process.env.LANGFUSE_LITE_ALLOWED_HOSTS = "lite.internal";
+    try {
+      expect((await at("lite.internal:3000")).status).toBe(200);
+    } finally {
+      delete process.env.LANGFUSE_LITE_ALLOWED_HOSTS;
+    }
+    // Listening beyond loopback is the user's choice; any host name is served then.
+    expect((await handle(db, new Request("http://my-laptop.lan:3000/api/lite/roots"))).status).toBe(200);
+  });
+
+  test("export keeps `$` sequences and line separators in the data intact", async () => {
+    const tricky = "costs $$5, $& and $' and $`   </script><script>alert(1)</script>";
+    await call("POST", "/api/public/scores", { id: "tricky", name: "note", value: "ok", traceId: "11111111111111111111111111111111", comment: tricky });
+    const { html } = exportViewer(db, 100);
+    expect(html.match(/<script>/g)!.length).toBe(2);
+    const data = JSON.parse(html.match(/window\.__LITE_DATA__ = (.*?);<\/script>/s)![1]);
+    const comments = data.trees["11111111111111111111111111111111"].scores.map((s: any) => s.comment);
+    expect(comments).toContain(tricky);
+  });
+});
+
+describe("CLI", () => {
+  const cli = (...args: string[]) => {
+    const run = Bun.spawnSync(["bun", "src/cli.ts", ...args], { stdout: "pipe", stderr: "pipe" });
+    return { code: run.exitCode, out: new TextDecoder().decode(run.stdout), err: new TextDecoder().decode(run.stderr) };
+  };
+
+  test("sql cannot write, whatever the statement starts with", () => {
+    const file = join(dir, "lite.db");
+    const before = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM scores")!.n;
+    expect(before).toBeGreaterThan(0);
+    for (const query of ["WITH x AS (SELECT 1) DELETE FROM scores", "DELETE FROM scores", "PRAGMA user_version = 7"]) {
+      const run = cli("sql", query, "--db", file);
+      expect(run.code).toBe(1);
+      expect(run.err).toContain("read-only");
+    }
+    expect(db.get<{ n: number }>("SELECT COUNT(*) AS n FROM scores")!.n).toBe(before);
+    expect(db.get<{ user_version: number }>("PRAGMA user_version")!.user_version).toBe(0);
+    expect(cli("sql", "SELECT COUNT(*) AS n FROM scores", "--db", file, "--json").out).toContain(`"n": ${before}`);
+  });
+
+  test("read commands do not create a database; bad options are named", () => {
+    const missing = join(dir, "nowhere", "lite.db");
+    const run = cli("runs", "--db", missing);
+    expect(run.code).toBe(1);
+    expect(run.err).toContain("no database at");
+    expect(existsSync(join(dir, "nowhere"))).toBe(false);
+    const file = join(dir, "lite.db");
+    expect(cli("observations", "--limit", "abc", "--db", file).err).toContain("--limit must be");
+    expect(cli("observations", "--since", "nope", "--db", file).err).toContain("--since must be");
+    expect(cli("--version").out.trim()).toBe(JSON.parse(readFileSync("package.json", "utf8")).version);
   });
 });
