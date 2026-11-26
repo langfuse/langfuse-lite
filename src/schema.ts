@@ -6,7 +6,7 @@
 
 import type { Db } from "./db";
 
-export const SCHEMA_VERSION = 2;
+export const SCHEMA_VERSION = 3;
 
 // Columns computed from others, for plain SQL: SUM(input_usage), AVG(latency_ms).
 const DERIVED: [string, string, string][] = [
@@ -32,6 +32,15 @@ CREATE TABLE IF NOT EXISTS otlp_requests (
   span_count INTEGER NOT NULL,
   pushed_at TEXT
 );
+
+-- Older databases only recorded pushed_at, with no destination. Replay those
+-- requests once per verified project using their original span IDs.
+CREATE TABLE IF NOT EXISTS otlp_deliveries (
+  base_url TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  request_id INTEGER NOT NULL REFERENCES otlp_requests(id) ON DELETE CASCADE,
+  PRIMARY KEY (base_url, project_id, request_id)
+) WITHOUT ROWID;
 
 CREATE TABLE IF NOT EXISTS observations (
   id TEXT PRIMARY KEY,            -- the OTel span id

@@ -32,6 +32,7 @@ chmodSync("dist/cli.js", 0o755);
 const notices: [string, string][] = [
   ["Langfuse (vendor/langfuse: OTel conversion, cost calculation, model prices)", "vendor/LICENSE-langfuse"],
   ["Lucide icons (observation type icons in the viewer)", "vendor/LICENSE-lucide"],
+  ["Lodash", "node_modules/lodash/LICENSE"],
   ["zod", "node_modules/zod/LICENSE"],
   ["decimal.js", "node_modules/decimal.js/LICENCE.md"],
   ["lossless-json", "node_modules/lossless-json/LICENSE.md"],

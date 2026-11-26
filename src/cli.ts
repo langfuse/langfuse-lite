@@ -67,10 +67,11 @@ function dbPath(arg?: string) {
 }
 
 /** Only `serve` creates a database; the other commands read one that exists. */
-async function open(file: string, create: boolean): Promise<Db> {
-  if (create) fs.mkdirSync(path.dirname(file), { recursive: true });
+async function open(file: string, command: string): Promise<Db> {
+  if (command === "serve") fs.mkdirSync(path.dirname(file), { recursive: true });
   else if (!fs.existsSync(file))
     throw new Error(`no database at ${file}. Start one with "langfuse-lite serve", or pass --db <path> (or set LANGFUSE_LITE_DB).`);
+  if (command === "sql") return openDb(file, { readOnly: true });
   const db = await openDb(file);
   migrate(db);
   return db;
@@ -332,7 +333,7 @@ export async function main(argv = process.argv.slice(2)) {
     throw new Error(`--since must be a date or time such as 2026-01-31 or 2026-01-31T12:00:00Z, got "${o.since}"`);
   const port = intOption("port", o.port ?? process.env.PORT, 3000, 0, 65535);
   const file = dbPath(o.db);
-  const db = await open(file, command === "serve");
+  const db = await open(file, command);
   try {
     switch (command) {
       case "serve": {
