@@ -43,21 +43,35 @@ export async function push(db: Db, opts: PushOptions) {
     return text ? JSON.parse(text) : null;
   };
 
-  const datasets = db.all<Record<string, any>>("SELECT * FROM datasets ORDER BY created_at");
-  const items = db.all<Record<string, any>>(
-    "SELECT i.*, d.name AS dataset_name FROM dataset_items i JOIN datasets d ON d.id = i.dataset_id ORDER BY i.created_at",
-  );
-  const requests = db.all<{ id: number; content_type: string; body: Uint8Array; span_count: number }>(
-    "SELECT id, content_type, body, span_count FROM otlp_requests WHERE pushed_at IS NULL ORDER BY id",
-  );
-  const scores = db.all<Record<string, any>>("SELECT * FROM scores ORDER BY timestamp");
+  // Cache the key-to-project lookup so dry runs also work offline. A new key
+  // gets a conservative estimate until its project has been verified.
+  const cacheKey = JSON.stringify(["push-project", base, opts.publicKey]);
+  let projectId: string | null;
+  if (opts.dryRun) {
+    projectId = db.get<{ value: string }>("SELECT value FROM lite_meta WHERE key = ?", cacheKey)?.value ?? null;
+  } else {
+    const project = (await call("GET", "/api/public/projects"))?.data?.[0];
+    if (typeof project?.id !== "string" || !project.id) throw new Error("Target returned no project ID");
+    projectId = project.id;
+    db.run("INSERT OR REPLACE INTO lite_meta (key, value) VALUES (?, ?)", cacheKey, projectId);
+    log(`  target project: ${project.name ?? "?"} (${projectId})`);
+  }
+  const pending = `FROM otlp_requests r WHERE NOT EXISTS (
+    SELECT 1 FROM otlp_deliveries d WHERE d.base_url = ? AND d.project_id = ? AND d.request_id = r.id
+  )`;
+  const totals = db.get<{ requests: number; spans: number; last_id: number }>(
+    `SELECT COUNT(*) AS requests, COALESCE(SUM(span_count), 0) AS spans, COALESCE(MAX(id), 0) AS last_id ${pending}`,
+    base, projectId,
+  )!;
+  const counts = db.get<{ datasets: number; datasetItems: number; scores: number }>(
+    `SELECT (SELECT COUNT(*) FROM datasets) AS datasets, (SELECT COUNT(*) FROM dataset_items) AS datasetItems,
+      (SELECT COUNT(*) FROM scores) AS scores`,
+  )!;
   const report = {
     target: base,
-    datasets: datasets.length,
-    datasetItems: items.length,
-    otlpRequests: requests.length,
-    spans: requests.reduce((n, r) => n + r.span_count, 0),
-    scores: scores.length,
+    ...counts,
+    otlpRequests: totals.requests,
+    spans: totals.spans,
     dryRun: Boolean(opts.dryRun),
   };
   log(
@@ -66,9 +80,11 @@ export async function push(db: Db, opts: PushOptions) {
   );
   if (opts.dryRun) return report;
 
-  const project = await call("GET", "/api/public/projects");
-  log(`  target project: ${project?.data?.[0]?.name ?? "?"} (${project?.data?.[0]?.id ?? "?"})`);
-
+  const datasets = db.all<Record<string, any>>("SELECT * FROM datasets ORDER BY created_at");
+  const items = db.all<Record<string, any>>(
+    "SELECT i.*, d.name AS dataset_name FROM dataset_items i JOIN datasets d ON d.id = i.dataset_id ORDER BY i.created_at",
+  );
+  const scores = db.all<Record<string, any>>("SELECT * FROM scores ORDER BY timestamp");
   const datasetIds = new Map<string, string>();
   for (const d of datasets) {
     const created = await call("POST", "/api/public/v2/datasets", {
@@ -94,13 +110,25 @@ export async function push(db: Db, opts: PushOptions) {
   }
   if (datasets.length) log(`  datasets and items done`);
 
-  for (const r of requests) {
+  // A single payload can be large. Fetch one at a time, stopping at the last
+  // request counted above even if the local server keeps ingesting more.
+  let lastId = 0;
+  while (lastId < totals.last_id) {
+    const r = db.get<{ id: number; content_type: string; body: Uint8Array }>(
+      `SELECT r.id, r.content_type, r.body ${pending} AND r.id > ? AND r.id <= ? ORDER BY r.id LIMIT 1`,
+      base, projectId, lastId, totals.last_id,
+    );
+    if (!r) break;
     const resourceSpans = decodeTraceRequest(r.body, r.content_type);
     rewriteDatasetIds(resourceSpans, datasetIds);
     await call("POST", "/api/public/otel/v1/traces", encodeTraceRequestJson(resourceSpans));
-    db.run("UPDATE otlp_requests SET pushed_at = ? WHERE id = ?", new Date().toISOString(), r.id);
+    db.tx(() => {
+      db.run("INSERT OR IGNORE INTO otlp_deliveries (base_url, project_id, request_id) VALUES (?, ?, ?)", base, projectId, r.id);
+      db.run("UPDATE otlp_requests SET pushed_at = ? WHERE id = ?", new Date().toISOString(), r.id);
+    });
+    lastId = r.id;
   }
-  if (requests.length) log(`  spans done`);
+  if (totals.requests) log(`  spans done`);
 
   for (const s of scores) {
     const value =

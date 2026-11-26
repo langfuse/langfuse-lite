@@ -13,18 +13,18 @@ export interface Db {
 
 type Stmt = { run(...p: Param[]): unknown; all(...p: Param[]): unknown[]; get(...p: Param[]): unknown };
 
-export async function openDb(path: string): Promise<Db> {
+export async function openDb(path: string, { readOnly = false } = {}): Promise<Db> {
   let raw: { exec(sql: string): void; prepare(sql: string): Stmt; close(): void };
   let changes: () => number;
   if (typeof (globalThis as { Bun?: unknown }).Bun !== "undefined") {
     const { Database } = await import("bun:sqlite");
-    const d = new Database(path, { create: true, strict: true });
+    const d = new Database(path, { readonly: readOnly, create: !readOnly, strict: true });
     raw = { exec: (s) => d.exec(s), prepare: (s) => d.prepare(s) as unknown as Stmt, close: () => d.close() };
     changes = () => (d.query("SELECT changes() AS n").get() as { n: number }).n;
   } else {
     silenceSqliteWarning();
     const { DatabaseSync } = await import("node:sqlite");
-    const d = new DatabaseSync(path);
+    const d = new DatabaseSync(path, { readOnly });
     raw = { exec: (s) => d.exec(s), prepare: (s) => d.prepare(s) as unknown as Stmt, close: () => d.close() };
     changes = () => (d.prepare("SELECT changes() AS n").get() as { n: number }).n;
   }
@@ -45,8 +45,8 @@ export async function openDb(path: string): Promise<Db> {
     get: <T>(sql: string, ...p: Param[]) => (stmt(sql).get(...p) ?? undefined) as T | undefined,
     tx: (fn) => {
       if (depth > 0) return fn();
-      depth++;
       raw.exec("BEGIN IMMEDIATE");
+      depth++;
       try {
         const out = fn();
         raw.exec("COMMIT");
@@ -60,7 +60,8 @@ export async function openDb(path: string): Promise<Db> {
     },
     close: () => raw.close(),
   };
-  db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL; PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+  db.exec("PRAGMA busy_timeout = 5000; PRAGMA foreign_keys = ON;");
+  if (!readOnly) db.exec("PRAGMA journal_mode = WAL; PRAGMA synchronous = NORMAL;");
   return db;
 }
 

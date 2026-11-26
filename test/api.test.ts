@@ -268,13 +268,54 @@ describe("misc", () => {
     }
   }, 20000);
 
+  test("a failed BEGIN leaves the next transaction able to roll back", async () => {
+    const path = join(dir, "transactions.db");
+    const writer = await openDb(path);
+    const locker = await openDb(path);
+    try {
+      writer.exec("CREATE TABLE entries (value INTEGER); PRAGMA busy_timeout = 1");
+      locker.exec("BEGIN IMMEDIATE");
+      expect(() => writer.tx(() => writer.run("INSERT INTO entries VALUES (1)"))).toThrow(/locked|busy/i);
+      locker.exec("ROLLBACK");
+      expect(() => writer.tx(() => {
+        writer.run("INSERT INTO entries VALUES (2)");
+        throw new Error("cancel transaction");
+      })).toThrow("cancel transaction");
+      expect(writer.all("SELECT * FROM entries")).toEqual([]);
+    } finally {
+      locker.close();
+      writer.close();
+    }
+  });
+
+  test("sql reads an existing database without migrating or changing it", async () => {
+    const path = join(dir, "readonly.db");
+    const writer = await openDb(path);
+    try {
+      writer.exec("CREATE TABLE entries (value INTEGER); INSERT INTO entries VALUES (7)");
+      const sql = (query: string) => Bun.spawnSync(["bun", "src/cli.ts", "sql", query, "--json", "--db", path]);
+      const read = sql("SELECT value FROM entries");
+      expect(read.exitCode).toBe(0);
+      expect(JSON.parse(read.stdout.toString())).toEqual([{ value: 7 }]);
+      expect(sql("WITH candidate AS (SELECT 8) INSERT INTO entries SELECT * FROM candidate").exitCode).toBe(1);
+      expect(sql("PRAGMA user_version = 3").exitCode).toBe(1);
+      expect(writer.all("SELECT * FROM entries")).toEqual([{ value: 7 }]);
+      expect(writer.get("PRAGMA user_version")).toEqual({ user_version: 0 });
+      expect(writer.all("SELECT name FROM sqlite_schema WHERE type = 'table'")).toEqual([{ name: "entries" }]);
+    } finally {
+      writer.close();
+    }
+  });
+
   test("the CLI points v3 commands at their v4 equivalents", () => {
     const run = Bun.spawnSync(["bun", "src/cli.ts", "traces", "--db", join(dir, "cli.db")], { stderr: "pipe" });
     expect(run.exitCode).toBe(1);
     expect(new TextDecoder().decode(run.stderr)).toContain("langfuse-lite observations");
   });
 
-  test("export embeds the viewer's data in one HTML file", () => {
+  test("export embeds the viewer's data in one HTML file", async () => {
+    const label = "Budget $& $$ $` $' </script>";
+    await call("POST", "/api/public/v2/datasets", { name: "ds", description: label });
     const { html, groups, runs } = exportViewer(db, 100);
     expect(groups).toBeGreaterThan(0);
     expect(runs).toBeGreaterThan(0);
@@ -284,6 +325,7 @@ describe("misc", () => {
     expect(data.compare.runs.map((r: any) => r.id)).toContain("exp-json-1");
     expect(data.datasets.map((d: any) => d.name)).toContain("ds");
     expect(Object.values(data.datasetDetails).some((d: any) => d.items.length === 1)).toBe(true);
+    expect(data.datasets.find((d: any) => d.name === "ds").description).toBe(label);
     expect(json).not.toContain("</");
   });
 
@@ -298,26 +340,53 @@ describe("misc", () => {
       }] }] }],
     });
     const seen: { path: string; body: string }[] = [];
+    let projectId = "staging";
+    let failAfter = -1;
     const target = Bun.serve({
       port: 0,
       async fetch(req) {
         const path = new URL(req.url).pathname;
         seen.push({ path, body: await req.text() });
-        if (path === "/api/public/projects") return Response.json({ data: [{ id: "p", name: "target" }] });
+        if (path === "/api/public/projects") return Response.json({ data: [{ id: projectId, name: "target" }] });
+        if (path === "/api/public/otel/v1/traces" && failAfter-- === 0) return new Response("retry later", { status: 503 });
         if (path === "/api/public/v2/datasets") return Response.json({ id: "remote-ds-id" });
         return Response.json({});
       },
     });
     try {
-      const report = await push(db, { baseUrl: `http://127.0.0.1:${target.port}`, publicKey: "pk", secretKey: "sk" });
+      const opts = { baseUrl: `http://127.0.0.1:${target.port}`, publicKey: "pk", secretKey: "sk" };
+      // A legacy global timestamp cannot identify which project received the spans.
+      db.run("UPDATE otlp_requests SET pushed_at = '2026-01-01'");
+      const estimate = await push(db, { ...opts, dryRun: true });
+      expect(seen).toHaveLength(0);
+      expect(estimate.otlpRequests).toBeGreaterThan(1);
+      const report = await push(db, opts);
+      expect(report.otlpRequests).toBe(estimate.otlpRequests);
       expect(report.datasets).toBe(1);
       const traces = seen.filter((s) => s.path === "/api/public/otel/v1/traces").map((s) => s.body).join("\n");
       expect(traces).toContain("remote-ds-id");
       expect(traces).not.toContain(localId);
       // Second push: spans are not sent again.
       seen.length = 0;
-      await push(db, { baseUrl: `http://127.0.0.1:${target.port}`, publicKey: "pk", secretKey: "sk" });
+      await push(db, { ...opts, publicKey: "rotated-key" });
       expect(seen.some((s) => s.path === "/api/public/otel/v1/traces")).toBe(false);
+      expect((await push(db, { ...opts, dryRun: true })).otlpRequests).toBe(0);
+
+      // Same host, second project: failure on the second request must leave it pending.
+      projectId = "production";
+      const production = { ...opts, publicKey: "production-key" };
+      failAfter = 1;
+      seen.length = 0;
+      await expect(push(db, production)).rejects.toThrow("503");
+      const attempted = seen.filter((s) => s.path === "/api/public/otel/v1/traces");
+      expect(attempted).toHaveLength(2);
+      expect((await push(db, { ...production, dryRun: true })).otlpRequests).toBe(report.otlpRequests - 1);
+      seen.length = 0;
+      await push(db, production);
+      const retried = seen.filter((s) => s.path === "/api/public/otel/v1/traces");
+      expect(retried).toHaveLength(report.otlpRequests - 1);
+      expect(retried[0].body).toBe(attempted[1].body);
+      expect((await push(db, { ...production, dryRun: true })).otlpRequests).toBe(0);
     } finally {
       target.stop(true);
     }
