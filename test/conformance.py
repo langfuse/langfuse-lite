@@ -5,7 +5,7 @@ then the same read requests to both, compared field by field.
 
 The reference is any full Langfuse on localhost with the project keys
 pk-lf-lite / sk-lf-lite, for example Langfuse's Docker Compose setup with
-headless initialization (see the README). Both URLs must be localhost; the
+headless initialization (see docs/development.md). Both URLs must be localhost; the
 scenario writes test data.
 
 Comparison rules:
