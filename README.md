@@ -142,8 +142,14 @@ it never sends traces, prompts, outputs, names, ids, paths or host names.
   Cloud. Each database gets a random id.
 - **When:** at `serve` start, once after the first trace of a session, hourly
   while data keeps arriving, and after `push`. The read commands send nothing.
-- **Off:** `TELEMETRY_ENABLED=false` or `DO_NOT_TRACK=1`. It is always off in
-  CI (`CI` is set) and for the temporary databases of the Python fixtures.
+- **Always off** in CI (`CI` is set) and for the temporary databases of the
+  Python fixtures.
+
+To turn it off, set either variable before starting the server:
+
+```bash
+export TELEMETRY_ENABLED=false    # or: export DO_NOT_TRACK=1
+```
 
 The code is in [`src/telemetry.ts`](src/telemetry.ts).
 
