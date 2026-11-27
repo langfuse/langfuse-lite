@@ -5,8 +5,9 @@ process and one SQLite file, with the official Langfuse SDKs unchanged.
 No Docker, no account, no databases to run.
 
 > **Status: beta, an experiment.** Published on
-> [npm](https://www.npmjs.com/package/langfuse-lite); not on PyPI yet. Not
-> proven that agents will pick it.
+> [npm](https://www.npmjs.com/package/langfuse-lite) and
+> [PyPI](https://pypi.org/project/langfuse-lite/). Not proven that agents will
+> pick it.
 
 > **Before you use it.** langfuse-lite is a local emulator of Langfuse for
 > development, not a way to run Langfuse.
@@ -25,6 +26,7 @@ No Docker, no account, no databases to run.
 
 ```bash
 npx -y langfuse-lite serve        # needs Node 22.13+
+uvx langfuse-lite serve           # or from PyPI: no Node needed
 ```
 
 ```bash
@@ -88,10 +90,15 @@ trace id 478d02b45e251eadf418f4546f2e2827  ·  support-agent  ·  5 observations
 scores: resolved=no, helpfulness=0.4 "tool failed, offered a workaround"
 ```
 
-The Python package (not on PyPI yet; build the wheels from this repository)
-registers pytest fixtures (`langfuse_lite`, `langfuse_lite_env`) and a
-`serve()` context manager that start a server on a free port with a temporary
-database.
+The PyPI package (`pip install langfuse-lite`) also registers pytest fixtures
+(`langfuse_lite`, `langfuse_lite_env`) and a `serve()` context manager that
+start a server on a free port with a temporary database:
+
+```python
+def test_my_agent(langfuse_lite_env):       # LANGFUSE_* are set for the test
+    run_my_agent()                          # traced with the Langfuse SDK as usual
+    assert "my-agent" in langfuse_lite_env.cli("observations")
+```
 
 ## What it serves
 
@@ -117,8 +124,8 @@ the metrics API, access control, media, annotation queues.
   `scores`, `datasets` and `dataset_items`. Raw OTLP requests are kept, which
   is what `push` replays.
 - TypeScript on Node's and Bun's built-in SQLite, with no runtime dependencies.
-  Ships as one JS file on npm; standalone executables and PyPI wheels build
-  from this repository but are not published yet.
+  Ships as one JS file on npm and as PyPI wheels that wrap a standalone
+  executable (Linux, macOS, Windows).
 
 ## Security and limits
 
