@@ -46,9 +46,13 @@ class LangfuseLite:
             self._tmp = tempfile.TemporaryDirectory(prefix="langfuse-lite-")
             db = Path(self._tmp.name) / "lite.db"
         self.db = str(db)
+        env = dict(os.environ)
+        if self._tmp:
+            # A temporary database is a test run: no usage telemetry for those.
+            env["TELEMETRY_ENABLED"] = "false"
         self.process = subprocess.Popen(
             [binary(), "serve", "--host", host, "--port", str(port), "--db", self.db],
-            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, env=env,
         )
         self.log: list[str] = []
         line = self.process.stdout.readline() if self.process.stdout else ""

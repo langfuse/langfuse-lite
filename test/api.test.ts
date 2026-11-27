@@ -11,6 +11,7 @@ import { decodeTraceRequestProto } from "../src/otlp";
 import { push } from "../src/push";
 import { migrate } from "../src/schema";
 import { serve, type Server } from "../src/server";
+import { capture, capturePush, POSTHOG_KEY, startServeTelemetry, telemetryEnabled } from "../src/telemetry";
 
 let dir: string;
 let db: Db;
@@ -479,5 +480,81 @@ describe("CLI", () => {
     expect(cli("observations", "--limit", "abc", "--db", file).err).toContain("--limit must be");
     expect(cli("observations", "--since", "nope", "--db", file).err).toContain("--since must be");
     expect(cli("--version").out.trim()).toBe(JSON.parse(readFileSync("package.json", "utf8")).version);
+  });
+});
+
+describe("telemetry", () => {
+  const receiver = () => {
+    const events: any[] = [];
+    const s = Bun.serve({ port: 0, async fetch(req) { events.push(await req.json()); return Response.json({ status: 1 }); } });
+    return { events, env: { LANGFUSE_LITE_TELEMETRY_KEY: "phc_test", LANGFUSE_LITE_TELEMETRY_URL: `http://127.0.0.1:${s.port}/capture/` }, stop: () => s.stop(true) };
+  };
+  const until = async (ok: () => boolean) => { for (let i = 0; i < 100 && !ok(); i++) await new Promise((r) => setTimeout(r, 20)); };
+
+  test("is off without a key, when opted out, and in CI", () => {
+    const key = { LANGFUSE_LITE_TELEMETRY_KEY: "phc_test" };
+    expect(telemetryEnabled({})).toBe(POSTHOG_KEY !== "");
+    expect(telemetryEnabled(key)).toBe(true);
+    expect(telemetryEnabled({ ...key, TELEMETRY_ENABLED: "false" })).toBe(false);
+    expect(telemetryEnabled({ ...key, DO_NOT_TRACK: "1" })).toBe(false);
+    expect(telemetryEnabled({ ...key, CI: "true" })).toBe(false);
+  });
+
+  test("serve reports the start, then the first data of the session; counts only", async () => {
+    const r = receiver();
+    const stop = startServeTelemetry(db, { loopback: true, firstDataDelayMs: 30 }, r.env);
+    try {
+      await until(() => r.events.length >= 1);
+      expect(r.events.map((e) => e.event)).toEqual(["langfuse_lite:serve_started"]);
+      const started = r.events[0];
+      expect(started.api_key).toBe("phc_test");
+      expect(started.properties.observations).toBeGreaterThan(0);
+      expect(started.properties.lite_version).toBe(JSON.parse(readFileSync("package.json", "utf8")).version);
+      expect(started.properties.$process_person_profile).toBe(false);
+      // The id is random, stable per database, and nothing from the data is sent.
+      expect(started.distinct_id).toMatch(/^[0-9a-f-]{36}$/);
+      const sent = JSON.stringify(r.events);
+      for (const secret of ["11111111111111111111111111111111", "exp-json-1", "pk-test", dir]) expect(sent).not.toContain(secret);
+
+      await new Promise((r2) => setTimeout(r2, 80));
+      expect(r.events.length).toBe(1); // no new data, no further event
+      await call("POST", "/api/public/otel/v1/traces", { resourceSpans: [{ scopeSpans: [{ spans: [{
+        traceId: "33333333333333333333333333333333", spanId: "3333333333333333", name: "t",
+        startTimeUnixNano: String(T0), endTimeUnixNano: String(T0), attributes: [],
+      }] }] }] });
+      await until(() => r.events.length >= 2);
+      expect(r.events[1].event).toBe("langfuse_lite:first_data");
+      expect(r.events[1].distinct_id).toBe(started.distinct_id);
+      await new Promise((r2) => setTimeout(r2, 80));
+      expect(r.events.length).toBe(2); // once per session
+    } finally {
+      stop();
+      r.stop();
+    }
+  });
+
+  test("push reports counts and whether the target is Langfuse Cloud, never the host", async () => {
+    const r = receiver();
+    try {
+      await capturePush(db, "https://langfuse.internal.example", { datasets: 1, datasetItems: 2, spans: 3, scores: 4 }, r.env);
+      await capturePush(db, "https://us.cloud.langfuse.com", { datasets: 0, datasetItems: 0, spans: 0, scores: 0 }, r.env);
+      expect(r.events.map((e) => e.properties.to_langfuse_cloud)).toEqual([false, true]);
+      expect(r.events[0].properties.spans).toBe(3);
+      expect(JSON.stringify(r.events)).not.toContain("internal.example");
+    } finally {
+      r.stop();
+    }
+  });
+
+  test("an unreachable endpoint or opt-out never throws or sends", async () => {
+    const dead = { LANGFUSE_LITE_TELEMETRY_KEY: "phc_test", LANGFUSE_LITE_TELEMETRY_URL: "http://127.0.0.1:1/capture/" };
+    expect(await capture(db, "langfuse_lite:serve_started", {}, dead)).toBe(false);
+    const r = receiver();
+    try {
+      expect(await capture(db, "x", {}, { ...r.env, TELEMETRY_ENABLED: "false" })).toBe(false);
+      expect(r.events.length).toBe(0);
+    } finally {
+      r.stop();
+    }
   });
 });

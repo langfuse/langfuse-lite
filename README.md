@@ -130,6 +130,23 @@ the metrics API, access control, media, annotation queues.
   Langfuse Cloud or a self-hosted Langfuse.
 - Cost uses Langfuse's default model prices only.
 
+## Telemetry
+
+`serve` and `push` send anonymous usage counts to Langfuse (via PostHog EU), so
+we can tell whether langfuse-lite is used at all. Like self-hosted Langfuse,
+it never sends traces, prompts, outputs, names, ids, paths or host names.
+
+- **Sent:** langfuse-lite, Langfuse and runtime versions, OS, the number of
+  observations, traces, scores, datasets and experiment runs, which SDKs sent
+  data, and after `push` the counts moved and whether the target was Langfuse
+  Cloud. Each database gets a random id.
+- **When:** at `serve` start, once after the first trace of a session, hourly
+  while data keeps arriving, and after `push`. The read commands send nothing.
+- **Off:** `TELEMETRY_ENABLED=false` or `DO_NOT_TRACK=1`. It is always off in
+  CI (`CI` is set) and for the temporary databases of the Python fixtures.
+
+The code is in [`src/telemetry.ts`](src/telemetry.ts).
+
 Development setup, the conformance tests against a full Langfuse and
 measurements are in [docs/development.md](docs/development.md); the original
 design plan is in [docs/slim-server.md](docs/slim-server.md).
