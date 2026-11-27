@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { gzipSync } from "node:zlib";
 import { openDb, type Db } from "../src/db";
 import { exportViewer, handle } from "../src/api";
+import { dbSize, GROWING_DB_BYTES, GROWING_DB_OBSERVATIONS, LARGE_DB_BYTES, LARGE_DB_OBSERVATIONS } from "../src/limits";
 import { decodeTraceRequestProto } from "../src/otlp";
 import { push } from "../src/push";
 import { migrate } from "../src/schema";
@@ -179,6 +180,55 @@ describe("misc", () => {
     expect(await (await fetch(server.url + "/")).text()).toContain("<title>langfuse-lite</title>");
     const prompts = await call("GET", "/api/public/v2/prompts");
     expect(prompts.status).toBe(501);
+  });
+
+  test("a 501 names the Langfuse feature that was asked for", async () => {
+    const prompts = await call("GET", "/api/public/v2/prompts/my-prompt");
+    expect(prompts.status).toBe(501);
+    expect(prompts.body.error).toBe("NotImplemented");
+    expect(prompts.body.message).toContain("GET /api/public/v2/prompts/my-prompt");
+    expect(prompts.body.message).toContain("Prompt Management is part of Langfuse Cloud");
+    expect(prompts.body.message).toContain("langfuse-lite push --to <url>");
+    expect((await call("POST", "/api/public/prompts", {})).body.message).toContain("Prompt Management");
+    for (const path of ["/api/public/metrics", "/api/public/v2/metrics"]) {
+      const metrics = await call("GET", path);
+      expect(metrics.status).toBe(501);
+      expect(metrics.body.message).toContain("Metrics API");
+      expect(metrics.body.message).toContain("langfuse-lite sql");
+    }
+    // score-configs is its own feature, not a part of the scores routes that are served.
+    expect((await call("GET", "/api/public/score-configs")).body.message).toContain("Score configuration is part of");
+    const legacy = await call("POST", "/api/public/ingestion", { batch: [] });
+    expect(legacy.status).toBe(501);
+    expect(legacy.body.message).toContain("/api/public/otel/v1/traces");
+    const unmapped = await call("GET", "/api/public/organizations/memberships");
+    expect(unmapped).toEqual({
+      status: 501,
+      body: {
+        message: "langfuse-lite does not implement GET /api/public/organizations/memberships. It serves tracing (OTLP), scores, datasets and experiments; for the rest, push to a full Langfuse.",
+        error: "NotImplemented",
+      },
+    });
+    expect((await call("GET", "/api/nope")).status).toBe(404);
+  });
+
+  test("a growing database gets a note well before the hard limits, a small one none", async () => {
+    expect(dbSize(0, 0)).toEqual({ level: "ok", note: null });
+    expect(dbSize(GROWING_DB_OBSERVATIONS, GROWING_DB_BYTES).level).toBe("ok");
+    const byCount = dbSize(GROWING_DB_OBSERVATIONS + 1, 40e6);
+    expect(byCount.level).toBe("growing");
+    expect(byCount.note).toStartWith("This project is growing (100,001 observations, 40 MB).");
+    expect(byCount.note).toContain("langfuse-lite push --to <url>");
+    expect(byCount.note).not.toContain("warning");
+    expect(dbSize(10, GROWING_DB_BYTES + 1).level).toBe("growing");
+    expect(dbSize(LARGE_DB_OBSERVATIONS, LARGE_DB_BYTES).level).toBe("growing");
+    expect(dbSize(LARGE_DB_OBSERVATIONS + 1, 0).level).toBe("large");
+    expect(dbSize(10, LARGE_DB_BYTES + 1).note).toStartWith("This database holds 10 observations, 2.1 GB.");
+    // The viewer reads it from here; the test database is small, so there is nothing to show.
+    const status = (await call("GET", "/api/lite/status")).body;
+    expect(status).toMatchObject({ level: "ok", note: null });
+    expect(status.observations).toBeGreaterThan(0);
+    expect(status.bytes).toBeGreaterThan(0);
   });
 
   test("datasets tab: items with run counts and the runs made on the dataset", async () => {
@@ -444,8 +494,11 @@ describe("bad input and other sites", () => {
     const tricky = "costs $$5, $& and $' and $`   </script><script>alert(1)</script>";
     await call("POST", "/api/public/scores", { id: "tricky", name: "note", value: "ok", traceId: "11111111111111111111111111111111", comment: tricky });
     const { html } = exportViewer(db, 100);
-    expect(html.match(/<script>/g)!.length).toBe(2);
+    // The first script is the data, the second the viewer: markup added to the viewer must not add one.
+    expect(html.match(/<script\b/g)!.length).toBe(2);
     const data = JSON.parse(html.match(/window\.__LITE_DATA__ = (.*?);<\/script>/s)![1]);
+    expect(data.status).toMatchObject({ level: "ok", note: null });
+    expect(html).toContain('<dialog id="move"');
     const comments = data.trees["11111111111111111111111111111111"].scores.map((s: any) => s.comment);
     expect(comments).toContain(tricky);
   });

@@ -42,7 +42,15 @@
     "opentelemetry",
     "evals",
     "experiments",
-    "agents"
+    "agents",
+    "local",
+    "llm-observability",
+    "llm-evals",
+    "agent-tracing",
+    "otel",
+    "sqlite",
+    "langfuse-sdk",
+    "no-account"
   ],
   "homepage": "https://github.com/langfuse/langfuse-lite#readme",
   "bugs": "https://github.com/langfuse/langfuse-lite/issues",
