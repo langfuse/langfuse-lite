@@ -78,22 +78,106 @@ function runtime() {
   };
 }
 
+/** The proxy to use for a URL, from the usual environment variables, or null. */
+export function proxyFor(target: URL, env: Env = process.env): URL | null {
+  const raw = target.protocol === "https:" ? (env.HTTPS_PROXY ?? env.https_proxy) : (env.HTTP_PROXY ?? env.http_proxy);
+  if (!raw) return null;
+  const host = target.hostname.toLowerCase();
+  for (const entry of (env.NO_PROXY ?? env.no_proxy ?? "").split(",")) {
+    const rule = entry.trim().toLowerCase().replace(/^\*?\./, "").replace(/:\d+$/, "");
+    if (rule && (rule === "*" || host === rule || host.endsWith("." + rule))) return null;
+  }
+  try {
+    const proxy = new URL(raw.includes("://") ? raw : `http://${raw}`);
+    return proxy.protocol === "http:" ? proxy : null; // other proxy types: fall back to a direct request
+  } catch {
+    return null;
+  }
+}
+
+/** POSTs JSON through an HTTP proxy. Node's fetch ignores HTTPS_PROXY (Bun's does not),
+ * and sandboxed agents, the users we most want to count, usually sit behind one.
+ * https targets go through a CONNECT tunnel, http targets as a plain proxy request. */
+export async function postViaProxy(target: URL, proxy: URL, body: string, timeoutMs = SEND_TIMEOUT_MS): Promise<boolean> {
+  const http = await import("node:http");
+  const tls = await import("node:tls");
+  const auth = proxy.username
+    ? { "proxy-authorization": "Basic " + btoa(`${decodeURIComponent(proxy.username)}:${decodeURIComponent(proxy.password)}`) }
+    : {};
+  const proxyAt = { host: proxy.hostname, port: Number(proxy.port) || 80 };
+  const headers = { "content-type": "application/json", "content-length": String(Buffer.byteLength(body)) };
+  return new Promise<boolean>((resolve) => {
+    const open: { destroy(): void }[] = [];
+    let settled = false;
+    const done = (ok: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      for (const o of open) o.destroy();
+      resolve(ok);
+    };
+    const timer = setTimeout(() => done(false), timeoutMs);
+    const send = (options: Record<string, unknown>) => {
+      const req = http.request({ method: "POST", agent: false, ...options }, (res) => {
+        res.resume();
+        res.on("end", () => done((res.statusCode ?? 500) < 300));
+      });
+      open.push(req);
+      req.on("error", () => done(false));
+      req.end(body);
+    };
+    if (target.protocol !== "https:") {
+      send({ ...proxyAt, path: target.href, headers: { ...headers, ...auth, host: target.host } });
+      return;
+    }
+    const authority = `${target.hostname}:${target.port || 443}`;
+    const connect = http.request({ ...proxyAt, method: "CONNECT", path: authority, headers: { host: authority, ...auth }, agent: false });
+    open.push(connect);
+    connect.on("error", () => done(false));
+    connect.on("connect", (res, socket) => {
+      open.push(socket);
+      if (res.statusCode !== 200) return done(false);
+      const secure = tls.connect({ socket, servername: target.hostname });
+      open.push(secure);
+      secure.on("error", () => done(false));
+      // One request on the tunnel, written by hand: http.request would look the host up again.
+      let head = "";
+      secure.on("data", (chunk: Buffer) => {
+        head += chunk.toString("latin1");
+        const status = /^HTTP\/1\.[01] (\d{3})/.exec(head);
+        if (status) done(Number(status[1]) < 300);
+        else if (head.length > 64) done(false);
+      });
+      secure.on("end", () => done(false));
+      secure.write(
+        `POST ${target.pathname}${target.search} HTTP/1.1\r\nhost: ${target.host}\r\n` +
+          `content-type: application/json\r\ncontent-length: ${Buffer.byteLength(body)}\r\nconnection: close\r\n\r\n${body}`,
+      );
+    });
+    connect.end();
+  });
+}
+
 /** Sends one event; never throws and never takes longer than the timeout. */
 export async function capture(db: Db, event: string, properties: Record<string, unknown> = {}, env: Env = process.env): Promise<boolean> {
   if (!telemetryEnabled(env)) return false;
   try {
-    const res = await fetch(env.LANGFUSE_LITE_TELEMETRY_URL ?? DEFAULT_URL, {
+    const url = new URL(env.LANGFUSE_LITE_TELEMETRY_URL ?? DEFAULT_URL);
+    const body = JSON.stringify({
+      api_key: apiKey(env),
+      event,
+      distinct_id: installId(db),
+      timestamp: new Date().toISOString(),
+      // No person profile and no location lookup: the events are anonymous counts.
+      properties: { ...runtime(), ...properties, $process_person_profile: false, $geoip_disable: true },
+    });
+    const proxy = (globalThis as { Bun?: unknown }).Bun ? null : proxyFor(url, env);
+    if (proxy) return await postViaProxy(url, proxy, body);
+    const res = await fetch(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       signal: AbortSignal.timeout(SEND_TIMEOUT_MS),
-      body: JSON.stringify({
-        api_key: apiKey(env),
-        event,
-        distinct_id: installId(db),
-        timestamp: new Date().toISOString(),
-        // No person profile and no location lookup: the events are anonymous counts.
-        properties: { ...runtime(), ...properties, $process_person_profile: false, $geoip_disable: true },
-      }),
+      body,
     });
     return res.ok;
   } catch {

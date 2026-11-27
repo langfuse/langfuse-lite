@@ -11,7 +11,8 @@ import { decodeTraceRequestProto } from "../src/otlp";
 import { push } from "../src/push";
 import { migrate } from "../src/schema";
 import { serve, type Server } from "../src/server";
-import { capture, capturePush, POSTHOG_KEY, startServeTelemetry, telemetryEnabled } from "../src/telemetry";
+import { capture, capturePush, POSTHOG_KEY, postViaProxy, proxyFor, startServeTelemetry, telemetryEnabled } from "../src/telemetry";
+import { createServer } from "node:http";
 
 let dir: string;
 let db: Db;
@@ -555,6 +556,44 @@ describe("telemetry", () => {
       expect(r.events.length).toBe(0);
     } finally {
       r.stop();
+    }
+  });
+});
+
+describe("telemetry through a proxy", () => {
+  test("the proxy comes from the environment and NO_PROXY is honoured", () => {
+    const https = new URL("https://eu.i.posthog.com/capture/");
+    expect(proxyFor(https, {})).toBeNull();
+    expect(proxyFor(https, { HTTPS_PROXY: "http://user:pw@proxy.local:3128" })!.host).toBe("proxy.local:3128");
+    expect(proxyFor(https, { https_proxy: "proxy.local:3128" })!.href).toBe("http://proxy.local:3128/");
+    expect(proxyFor(https, { HTTP_PROXY: "http://proxy.local:3128" })).toBeNull(); // only for http targets
+    expect(proxyFor(new URL("http://collector.local/x"), { HTTP_PROXY: "http://proxy.local:3128" })!.port).toBe("3128");
+    for (const no of ["*", "posthog.com", ".posthog.com", "*.posthog.com", "localhost, eu.i.posthog.com:443"])
+      expect(proxyFor(https, { HTTPS_PROXY: "http://proxy.local:3128", NO_PROXY: no })).toBeNull();
+    expect(proxyFor(https, { HTTPS_PROXY: "http://proxy.local:3128", NO_PROXY: "example.com,localhost" })).not.toBeNull();
+    expect(proxyFor(https, { HTTPS_PROXY: "socks5://proxy.local:1080" })).toBeNull();
+  });
+
+  test("an http target is requested from the proxy with its full URL and credentials", async () => {
+    const seen: { url: string; auth: string | undefined; body: string }[] = [];
+    const proxy = createServer((req, res) => {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        seen.push({ url: req.url ?? "", auth: req.headers["proxy-authorization"], body });
+        res.end("{}");
+      });
+    });
+    await new Promise<void>((r) => proxy.listen(0, "127.0.0.1", () => r()));
+    const port = (proxy.address() as { port: number }).port;
+    try {
+      const ok = await postViaProxy(new URL("http://collector.invalid/capture/"), new URL(`http://u:p@127.0.0.1:${port}`), '{"a":1}');
+      expect(ok).toBe(true);
+      expect(seen).toEqual([{ url: "http://collector.invalid/capture/", auth: "Basic " + btoa("u:p"), body: '{"a":1}' }]);
+      // A proxy that is not there, or refuses the tunnel, is a quiet false.
+      expect(await postViaProxy(new URL("https://collector.invalid/capture/"), new URL("http://127.0.0.1:1"), "{}", 500)).toBe(false);
+    } finally {
+      proxy.close();
     }
   });
 });
