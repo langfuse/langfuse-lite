@@ -4,8 +4,9 @@ A local Langfuse for code agents: **tracing and experiment runs** in one
 process and one SQLite file, with the official Langfuse SDKs unchanged.
 No Docker, no account, no databases to run.
 
-> **Status: experiment.** Not published to npm or PyPI yet, and not proven
-> that agents will pick it. Build it from this repository for now.
+> **Status: beta, an experiment.** Published on
+> [npm](https://www.npmjs.com/package/langfuse-lite); not on PyPI yet. Not
+> proven that agents will pick it.
 
 > **Before you use it.** langfuse-lite is a local emulator of Langfuse for
 > development, not a way to run Langfuse.
@@ -23,9 +24,7 @@ No Docker, no account, no databases to run.
 >   [self-host Langfuse](https://langfuse.com/self-hosting).
 
 ```bash
-git clone https://github.com/langfuse/langfuse-lite && cd langfuse-lite
-npm install && npm run build      # needs Node 22.13+ and Bun
-node dist/cli.js serve            # once published: npx -y langfuse-lite serve
+npx -y langfuse-lite serve        # needs Node 22.13+
 ```
 
 ```bash
@@ -89,9 +88,10 @@ trace id 478d02b45e251eadf418f4546f2e2827  ·  support-agent  ·  5 observations
 scores: resolved=no, helpfulness=0.4 "tool failed, offered a workaround"
 ```
 
-In Python, the PyPI package registers pytest fixtures (`langfuse_lite`,
-`langfuse_lite_env`) and a `serve()` context manager that start a server on a
-free port with a temporary database.
+The Python package (not on PyPI yet; build the wheels from this repository)
+registers pytest fixtures (`langfuse_lite`, `langfuse_lite_env`) and a
+`serve()` context manager that start a server on a free port with a temporary
+database.
 
 ## What it serves
 
@@ -117,7 +117,8 @@ the metrics API, access control, media, annotation queues.
   `scores`, `datasets` and `dataset_items`. Raw OTLP requests are kept, which
   is what `push` replays.
 - TypeScript on Node's and Bun's built-in SQLite, with no runtime dependencies.
-  Ships as one JS file, as standalone executables and as PyPI wheels.
+  Ships as one JS file on npm; standalone executables and PyPI wheels build
+  from this repository but are not published yet.
 
 ## Security and limits
 
