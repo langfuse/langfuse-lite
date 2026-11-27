@@ -7,6 +7,21 @@ No Docker, no account, no databases to run.
 > **Status: experiment.** Not published to npm or PyPI yet, and not proven
 > that agents will pick it. Build it from this repository for now.
 
+> **Before you use it.** langfuse-lite is a local emulator of Langfuse for
+> development, not a way to run Langfuse.
+>
+> - **No authentication, single tenant.** API keys are not checked: any key, or
+>   none, is accepted (the SDKs only need a placeholder to start). There is one
+>   project and no users. Anyone who can reach the port can read and write all
+>   data, prompts and outputs included.
+> - **Not security hardened** like Langfuse Cloud or a self-hosted Langfuse. It
+>   listens on `127.0.0.1` only; never expose it to a network you do not trust.
+> - **No compatibility guarantee.** It implements part of the Langfuse public
+>   API and may differ from Langfuse Cloud or lag behind it.
+> - **Not built for load.** For performance, scale and production use, switch
+>   to [Langfuse Cloud](https://cloud.langfuse.com) or
+>   [self-host Langfuse](https://langfuse.com/self-hosting).
+
 ```bash
 git clone https://github.com/langfuse/langfuse-lite && cd langfuse-lite
 npm install && npm run build      # needs Node 22.13+ and Bun
@@ -106,13 +121,37 @@ the metrics API, access control, media, annotation queues.
 
 ## Security and limits
 
-- **No authentication.** `serve` listens on `127.0.0.1` only; whoever can
-  reach the port can read and write everything. Do not expose it to the internet.
+- **No authentication.** API keys are not checked, and `serve` listens on
+  `127.0.0.1` only; whoever can reach the port can read and write everything.
+  `--host` opens it to the network: do that on a trusted network only.
 - Requests from other websites are refused; set `LANGFUSE_LITE_ALLOWED_HOSTS`
   to serve it under another host name.
 - For local use: one request at a time, bodies up to 64 MB. For more, use
   Langfuse Cloud or a self-hosted Langfuse.
 - Cost uses Langfuse's default model prices only.
+
+## Telemetry
+
+`serve` and `push` send anonymous usage counts to Langfuse (via PostHog EU), so
+we can tell whether langfuse-lite is used at all. Like self-hosted Langfuse,
+it never sends traces, prompts, outputs, names, ids, paths or host names.
+
+- **Sent:** langfuse-lite, Langfuse and runtime versions, OS, the number of
+  observations, traces, scores, datasets and experiment runs, which SDKs sent
+  data, and after `push` the counts moved and whether the target was Langfuse
+  Cloud. Each database gets a random id.
+- **When:** at `serve` start, once after the first trace of a session, hourly
+  while data keeps arriving, and after `push`. The read commands send nothing.
+- **Always off** in CI (`CI` is set) and for the temporary databases of the
+  Python fixtures.
+
+To turn it off, set either variable before starting the server:
+
+```bash
+export TELEMETRY_ENABLED=false    # or: export DO_NOT_TRACK=1
+```
+
+The code is in [`src/telemetry.ts`](src/telemetry.ts).
 
 Development setup, the conformance tests against a full Langfuse and
 measurements are in [docs/development.md](docs/development.md); the original

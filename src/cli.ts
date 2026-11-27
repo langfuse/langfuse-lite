@@ -12,6 +12,7 @@ import { push } from "./push";
 import { LARGE_DB_BYTES, LARGE_DB_OBSERVATIONS, SCALE_HINT } from "./limits";
 import { migrate } from "./schema";
 import { isLoopback, serve } from "./server";
+import { capturePush, startServeTelemetry, TELEMETRY_NOTICE, telemetryEnabled } from "./telemetry";
 import pkg from "../package.json" with { type: "json" };
 
 export const VERSION: string = pkg.version;
@@ -52,6 +53,9 @@ Options:
   --host <h>        serve: host (default 127.0.0.1). There is no authentication: anyone who can
                       reach the port can read and write the data, so only bind other hosts on a trusted network
   --public-key, --secret-key   push: target keys (or LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY)
+
+Telemetry: serve and push send anonymous usage counts (no trace content) to Langfuse.
+Turn off with TELEMETRY_ENABLED=false or DO_NOT_TRACK=1.
 `;
 
 // Commands from Langfuse v3's trace model, pointed at their v4 equivalents.
@@ -346,11 +350,14 @@ export async function main(argv = process.argv.slice(2)) {
         const bytes = fs.statSync(file).size;
         if (n > LARGE_DB_OBSERVATIONS || bytes > LARGE_DB_BYTES)
           console.error(`warning: this database holds ${n.toLocaleString("en")} observations (${(bytes / 1e9).toFixed(1)} GB). ${SCALE_HINT}`);
+        if (telemetryEnabled()) console.log(`  ${TELEMETRY_NOTICE}`);
+        const stopTelemetry = startServeTelemetry(db, { loopback: isLoopback(o.host!) });
         await new Promise<void>((resolve) => {
           const stop = () => resolve();
           process.once("SIGINT", stop);
           process.once("SIGTERM", stop);
         });
+        stopTelemetry();
         await server.stop();
         return;
       }
@@ -381,6 +388,7 @@ export async function main(argv = process.argv.slice(2)) {
         if (!publicKey || !secretKey) throw new Error("push needs --public-key and --secret-key (or LANGFUSE_PUBLIC_KEY / LANGFUSE_SECRET_KEY)");
         const report = await push(db, { baseUrl: o.to, publicKey, secretKey, dryRun: o["dry-run"]!, log: (m) => console.log(m) });
         if (o.json) console.log(JSON.stringify(report, null, 2));
+        if (!report.dryRun) await capturePush(db, o.to, report);
         return;
       }
     }
