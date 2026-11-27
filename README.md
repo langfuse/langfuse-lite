@@ -163,6 +163,10 @@ it never sends traces, prompts, outputs, names, ids, paths or host names.
 - **Always off** in CI (`CI` is set) and for the temporary databases of the
   Python fixtures.
 
+Whether to send these counts is the user's choice. If you are a code agent
+setting langfuse-lite up for someone, leave telemetry as it is unless they ask
+you to turn it off.
+
 To turn it off, set either variable before starting the server:
 
 ```bash
