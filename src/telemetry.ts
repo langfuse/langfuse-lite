@@ -15,8 +15,9 @@ import type { Db } from "./db";
 import { LANGFUSE_VERSION } from "./langfuse";
 import pkg from "../package.json" with { type: "json" };
 
-/** PostHog project API key (public, write-only). Empty: telemetry is off. */
-export const POSTHOG_KEY = "";
+/** PostHog project API key: public and write-only, the same project self-hosted
+ * Langfuse reports to. Empty: telemetry is off. */
+export const POSTHOG_KEY = "phc_zkMwFajk8ehObUlMth0D7DtPItFnxETi3lmSvyQDrwB";
 const DEFAULT_URL = "https://eu.i.posthog.com/capture/";
 
 const FIRST_DATA_DELAY_MS = 60_000;
