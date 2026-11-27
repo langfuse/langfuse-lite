@@ -7,6 +7,21 @@ No Docker, no account, no databases to run.
 > **Status: experiment.** Not published to npm or PyPI yet, and not proven
 > that agents will pick it. Build it from this repository for now.
 
+> **Before you use it.** langfuse-lite is a local emulator of Langfuse for
+> development, not a way to run Langfuse.
+>
+> - **No authentication, single tenant.** API keys are not checked: any key, or
+>   none, is accepted (the SDKs only need a placeholder to start). There is one
+>   project and no users. Anyone who can reach the port can read and write all
+>   data, prompts and outputs included.
+> - **Not security hardened** like Langfuse Cloud or a self-hosted Langfuse. It
+>   listens on `127.0.0.1` only; never expose it to a network you do not trust.
+> - **No compatibility guarantee.** It implements part of the Langfuse public
+>   API and may differ from Langfuse Cloud or lag behind it.
+> - **Not built for load.** For performance, scale and production use, switch
+>   to [Langfuse Cloud](https://cloud.langfuse.com) or
+>   [self-host Langfuse](https://langfuse.com/self-hosting).
+
 ```bash
 git clone https://github.com/langfuse/langfuse-lite && cd langfuse-lite
 npm install && npm run build      # needs Node 22.13+ and Bun
@@ -106,8 +121,9 @@ the metrics API, access control, media, annotation queues.
 
 ## Security and limits
 
-- **No authentication.** `serve` listens on `127.0.0.1` only; whoever can
-  reach the port can read and write everything. Do not expose it to the internet.
+- **No authentication.** API keys are not checked, and `serve` listens on
+  `127.0.0.1` only; whoever can reach the port can read and write everything.
+  `--host` opens it to the network: do that on a trusted network only.
 - Requests from other websites are refused; set `LANGFUSE_LITE_ALLOWED_HOSTS`
   to serve it under another host name.
 - For local use: one request at a time, bodies up to 64 MB. For more, use
