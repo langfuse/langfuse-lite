@@ -5,7 +5,7 @@
 import type { Db, Param } from "./db";
 import { decodeTraceRequest, decompress, ingestTraceRequest } from "./ingest";
 import { findModelById, LANGFUSE_VERSION } from "./langfuse";
-import { isBusy, MAX_BODY_BYTES, noteRequestTime, SCALE_HINT } from "./limits";
+import { dbSize, isBusy, MAX_BODY_BYTES, notImplementedMessage, noteRequestTime, SCALE_HINT } from "./limits";
 import { VIEWER_HTML } from "./viewer";
 
 export const PROJECT = { id: "local", name: "langfuse-lite" };
@@ -699,6 +699,7 @@ route("GET", "/api/public/experiment-items", ({ db, url }) => ok(listExperimentI
 
 // langfuse-lite's own endpoints, for the viewer.
 route("GET", "/", () => new Response(VIEWER_HTML, { headers: { "content-type": "text/html; charset=utf-8" } }));
+route("GET", "/api/lite/status", ({ db }) => ok(sizeStatus(db)));
 route("GET", "/api/lite/roots", ({ db, url }) => ok({ data: listRoots(db, limitOf(url.searchParams, 100, 1000)) }));
 route("GET", "/api/lite/tree/:traceId", ({ db, params }) => {
   const tree = observationTree(db, decodeURIComponent(params[0]));
@@ -794,13 +795,7 @@ async function route_(db: Db, req: Request): Promise<Response> {
       if (m) return await h({ db, req, url, params: m.slice(1) });
     }
     if (url.pathname.startsWith("/api/public/"))
-      return ok(
-        {
-          message: `langfuse-lite does not implement ${req.method} ${url.pathname}. It serves tracing (OTLP), scores, datasets and experiments; for the rest, push to a full Langfuse.`,
-          error: "NotImplemented",
-        },
-        501,
-      );
+      return ok({ message: notImplementedMessage(req.method, url.pathname), error: "NotImplemented" }, 501);
     return ok({ message: "Not found", error: "NotFound" }, 404);
   } catch (e) {
     if (e instanceof HttpError) return ok({ message: e.message, error: e.error }, e.status);
@@ -815,6 +810,14 @@ async function route_(db: Db, req: Request): Promise<Response> {
 }
 
 // ---------------------------------------------------------------- viewer data (also used by export)
+
+/** How large the database is and what, if anything, to tell the user about it. Read once by
+ * `serve` at start and once per viewer load, never per request. */
+export function sizeStatus(db: Db) {
+  const observations = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM observations")!.n;
+  const bytes = db.get<{ n: number }>("SELECT page_count * page_size AS n FROM pragma_page_count(), pragma_page_size()")!.n;
+  return { observations, bytes, ...dbSize(observations, bytes) };
+}
 
 /** Observations whose parent is not in the database (normally: no parent), newest first,
  * with totals over all observations that share their trace id. */
@@ -961,6 +964,7 @@ export function exportViewer(db: Db, limit: number): { html: string; groups: num
   for (const d of datasets) datasetDetails[d.id] = datasetDetail(db, d.id);
   const data = {
     exportedAt: new Date().toISOString(),
+    status: sizeStatus(db),
     roots,
     trees,
     experiments,

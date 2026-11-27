@@ -19,7 +19,10 @@ import zipfile
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
-VERSION = json.loads((ROOT / "package.json").read_text())["version"]
+PACKAGE = json.loads((ROOT / "package.json").read_text())
+VERSION = PACKAGE["version"]
+# One list for both registries: PyPI shows the keywords of package.json.
+KEYWORDS = ",".join(PACKAGE["keywords"])
 PLATFORMS = {
     "linux-x64": "manylinux_2_17_x86_64.manylinux2014_x86_64",
     "linux-arm64": "manylinux_2_17_aarch64.manylinux2014_aarch64",
@@ -37,8 +40,18 @@ Version: {VERSION}
 Summary: A local Langfuse for experiment runs and agent tracing: one process, one SQLite file, the Langfuse SDKs unchanged.
 License: MIT
 License-File: LICENSE
+Keywords: {KEYWORDS}
+Classifier: Development Status :: 4 - Beta
+Classifier: Intended Audience :: Developers
+Classifier: License :: OSI Approved :: MIT License
+Classifier: Programming Language :: Python :: 3
+Classifier: Framework :: Pytest
+Classifier: Topic :: Software Development :: Testing
+Classifier: Topic :: System :: Monitoring
 Requires-Python: >=3.9
+Project-URL: Homepage, https://github.com/langfuse/langfuse-lite
 Project-URL: Source, https://github.com/langfuse/langfuse-lite
+Project-URL: Issues, https://github.com/langfuse/langfuse-lite/issues
 Description-Content-Type: text/markdown
 
 {README}"""

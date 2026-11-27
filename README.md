@@ -138,6 +138,16 @@ the metrics API, access control, media, annotation queues.
   Langfuse Cloud or a self-hosted Langfuse.
 - Cost uses Langfuse's default model prices only.
 
+## Moving to Langfuse Cloud or self-hosted
+
+Move when the project is shared with a team, runs in production, or needs what
+lite leaves out (prompt management, evaluators, dashboards, access control).
+`serve` and the viewer say so once a database passes 100,000 observations or 250 MB.
+
+1. Create a project and API keys at [Langfuse Cloud](https://cloud.langfuse.com), or [self-host Langfuse](https://langfuse.com/self-hosting).
+2. Copy the data: `langfuse-lite push --to <url> --public-key <pk> --secret-key <sk>`.
+3. Point the SDKs at it: change `LANGFUSE_BASE_URL`, `LANGFUSE_PUBLIC_KEY` and `LANGFUSE_SECRET_KEY`.
+
 ## Telemetry
 
 `serve` and `push` send anonymous usage counts to Langfuse (via PostHog EU), so

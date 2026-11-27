@@ -5,11 +5,11 @@
 import fs from "node:fs";
 import path from "node:path";
 import { parseArgs } from "node:util";
-import { compareRuns, experimentSummaries, exportViewer, findObservations, formatObservation, listRoots, observationTree, resolveRun } from "./api";
+import { compareRuns, experimentSummaries, exportViewer, findObservations, formatObservation, listRoots, observationTree, resolveRun, sizeStatus } from "./api";
 import { openDb, type Db } from "./db";
 import { LANGFUSE_VERSION } from "./langfuse";
 import { push } from "./push";
-import { LARGE_DB_BYTES, LARGE_DB_OBSERVATIONS, SCALE_HINT } from "./limits";
+import { SHARE_HINT } from "./limits";
 import { migrate } from "./schema";
 import { isLoopback, serve } from "./server";
 import { capturePush, startServeTelemetry, TELEMETRY_NOTICE, telemetryEnabled } from "./telemetry";
@@ -345,11 +345,11 @@ export async function main(argv = process.argv.slice(2)) {
         console.log(`langfuse-lite ${VERSION} listening on ${server.url}  (data: ${file})`);
         console.log(`  LANGFUSE_BASE_URL=${server.url} LANGFUSE_PUBLIC_KEY=pk-lf-local LANGFUSE_SECRET_KEY=sk-lf-local`);
         if (!isLoopback(o.host!))
-          console.error(`warning: listening on ${o.host}, not only on this machine. langfuse-lite has no authentication: anyone who can reach this port can read and write the data.`);
-        const n = db.get<{ n: number }>("SELECT COUNT(*) AS n FROM observations")!.n;
-        const bytes = fs.statSync(file).size;
-        if (n > LARGE_DB_OBSERVATIONS || bytes > LARGE_DB_BYTES)
-          console.error(`warning: this database holds ${n.toLocaleString("en")} observations (${(bytes / 1e9).toFixed(1)} GB). ${SCALE_HINT}`);
+          console.error(`warning: listening on ${o.host}, not only on this machine. langfuse-lite has no authentication: anyone who can reach this port can read and write the data. ${SHARE_HINT}`);
+        // Past the hard limits this is a warning; a growing project gets one plain line, once.
+        const size = sizeStatus(db);
+        if (size.level === "large") console.error(`warning: ${size.note}`);
+        else if (size.level === "growing") console.log(`  ${size.note}`);
         if (telemetryEnabled()) console.log(`  ${TELEMETRY_NOTICE}`);
         const stopTelemetry = startServeTelemetry(db, { loopback: isLoopback(o.host!) });
         await new Promise<void>((resolve) => {
